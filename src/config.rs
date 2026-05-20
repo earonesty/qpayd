@@ -19,8 +19,6 @@ pub struct Config {
 pub struct ServerConfig {
     #[serde(default = "default_listen")]
     pub listen: String,
-    #[serde(default = "default_public_url")]
-    pub public_url: String,
     #[serde(default = "default_onchain_poll_seconds")]
     pub onchain_poll_seconds: u64,
 }
@@ -230,7 +228,6 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             listen: default_listen(),
-            public_url: default_public_url(),
             onchain_poll_seconds: default_onchain_poll_seconds(),
         }
     }
@@ -247,10 +244,6 @@ impl Default for PricingConfig {
 
 fn default_listen() -> String {
     "127.0.0.1:8080".to_string()
-}
-
-fn default_public_url() -> String {
-    "http://127.0.0.1:8080".to_string()
 }
 
 fn default_onchain_poll_seconds() -> u64 {

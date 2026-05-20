@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>qpayd payment link example</title>
+</head>
+<body>
+  <button id="pay">Pay with Bitcoin</button>
+  <script type="module">
+    import { openPaymentLink } from "../src/index.js";
+
+    document.querySelector("#pay").addEventListener("click", async () => {
+      await openPaymentLink({
+        baseUrl: "https://pay.example.com",
+        storeId: "main",
+        paymentLinkId: "donate-10",
+        onSettled(invoice) {
+          console.log("paid", invoice.id);
+        }
+      });
+    });
+  </script>
+</body>
+</html>

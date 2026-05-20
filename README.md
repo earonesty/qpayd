@@ -1,8 +1,8 @@
 # qpayd
 
 `qpayd` is a small self-hosted Bitcoin and Lightning payment daemon. It creates
-invoices, locks fiat prices to BTC using configured rate sources, serves checkout
-pages, tracks payment state, and emits signed webhooks.
+invoices, locks fiat prices to BTC using configured rate sources, tracks payment
+state, and emits signed webhooks.
 
 Project page: <https://earonesty.github.io/qpayd/>
 
@@ -30,7 +30,6 @@ Create `qpayd.toml`:
 ```toml
 [server]
 listen = "0.0.0.0:8080"
-public_url = "https://pay.example.com"
 onchain_poll_seconds = 30
 
 [database]
@@ -240,25 +239,34 @@ Response:
   "onchain_script_pubkey": "5120...",
   "lightning_bolt11": "lnbc...",
   "lightning_payment_hash": "...",
+  "bitcoin": {
+    "address": "bc1p...",
+    "uri": "bitcoin:bc1p...?amount=0.00025000",
+    "qr_svg_url": "/v1/public/stores/main/invoices/b8e2b1fd-1ef3-4b1c-bf1c-5a2d60cccb53/qr/bitcoin.svg"
+  },
+  "lightning": {
+    "bolt11": "lnbc...",
+    "uri": "lightning:lnbc...",
+    "qr_svg_url": "/v1/public/stores/main/invoices/b8e2b1fd-1ef3-4b1c-bf1c-5a2d60cccb53/qr/lightning.svg"
+  },
+  "min_confirmations": 1,
   "rate_source": "kraken",
   "rate": "100000",
   "metadata": {
     "site": "example.com",
     "order_id": "ord_123"
   },
-  "checkout_url": "https://pay.example.com/i/main/b8e2b1fd-1ef3-4b1c-bf1c-5a2d60cccb53",
   "expires_at": "2026-05-20T18:00:00Z",
   "created_at": "2026-05-20T17:45:00Z",
   "updated_at": "2026-05-20T17:45:00Z"
 }
 ```
 
-Open `checkout_url` to show the payment page.
-
 ## Public Payment Links
 
-Public payment links let static sites create fresh invoices without exposing a
-store API token. Configure a named link under a store:
+Public payment links let browser code create fresh invoices without exposing a
+store API token. A payment link is constrained by config: the browser can create
+only that configured amount, currency, and metadata.
 
 ```toml
 [[stores.payment_links]]
@@ -268,16 +276,68 @@ currency = "USD"
 metadata = { kind = "donation", site = "example.com" }
 ```
 
-Then add a button to any static site:
+Create an invoice from browser code:
 
-```html
-<form method="post" action="https://pay.example.com/p/main/donate-10">
-  <button type="submit">Pay with Bitcoin</button>
-</form>
+```sh
+curl -sS -X POST \
+  https://pay.example.com/v1/public/stores/main/payment-links/donate-10/invoices
 ```
 
-Submitting the form creates a new invoice and redirects to its checkout page.
-Opening the link in a browser shows a small hosted payment button page.
+Response:
+
+```json
+{
+  "id": "b8e2b1fd-1ef3-4b1c-bf1c-5a2d60cccb53",
+  "store_id": "main",
+  "status": "new",
+  "amount": "10.00",
+  "currency": "USD",
+  "btc_amount_sats": 10000,
+  "bitcoin": {
+    "address": "bc1q...",
+    "uri": "bitcoin:bc1q...?amount=0.00010000",
+    "qr_svg_url": "/v1/public/stores/main/invoices/b8e2b1fd-1ef3-4b1c-bf1c-5a2d60cccb53/qr/bitcoin.svg"
+  },
+  "lightning": {
+    "bolt11": "lnbc...",
+    "uri": "lightning:lnbc...",
+    "qr_svg_url": "/v1/public/stores/main/invoices/b8e2b1fd-1ef3-4b1c-bf1c-5a2d60cccb53/qr/lightning.svg"
+  },
+  "min_confirmations": 1,
+  "expires_at": "2026-05-20T18:00:00Z"
+}
+```
+
+The browser can show the QR code from `qr_svg_url`, copy `bitcoin.address` or
+`lightning.bolt11`, open `bitcoin.uri` or `lightning.uri`, and poll the public
+invoice endpoint for status:
+
+```sh
+curl -sS \
+  https://pay.example.com/v1/public/stores/main/invoices/$INVOICE_ID
+```
+
+The browser status is only customer UX. Fulfill orders from signed webhooks.
+
+## JavaScript Modal
+
+The `js/` folder contains a small browser client that makes payment links feel
+like a hosted checkout while keeping the UI in your site:
+
+```html
+<button id="pay">Pay with Bitcoin</button>
+<script type="module">
+  import { openPaymentLink } from "/js/src/index.js";
+
+  document.querySelector("#pay").addEventListener("click", () => {
+    openPaymentLink({
+      baseUrl: "https://pay.example.com",
+      storeId: "main",
+      paymentLinkId: "donate-10"
+    });
+  });
+</script>
+```
 
 ## Read An Invoice
 
@@ -298,8 +358,8 @@ for customer support or retry flows. Use `expired` to release inventory. Use
 ## Webhooks
 
 When `webhook_url` is configured, qpayd records each event in SQLite and
-delivers it from a retry queue. The checkout request does not depend on the
-receiver being online.
+delivers it from a retry queue. Invoice creation does not depend on the receiver
+being online.
 
 Events currently emitted:
 

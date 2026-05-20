@@ -19,7 +19,6 @@ pub struct Invoice {
     pub rate_source: String,
     pub rate: Decimal,
     pub metadata: serde_json::Value,
-    pub checkout_url: String,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

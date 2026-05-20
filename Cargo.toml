@@ -14,6 +14,7 @@ electrum-client = "0.25.0"
 hex = "0.4.3"
 hmac = "0.13.0"
 miniscript = "13.0.0"
+qrcode = "0.14.1"
 reqwest = { version = "0.13.3", features = ["form", "json", "query", "rustls"] }
 rust_decimal = { version = "1.42.0", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -24,7 +25,7 @@ subtle = "2.6.1"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }
 toml = "1.1.2"
-tower-http = { version = "0.6.11", features = ["trace"] }
+tower-http = { version = "0.6.11", features = ["cors", "trace"] }
 tower = "0.5.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
