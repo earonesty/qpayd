@@ -79,10 +79,16 @@ metadata = { kind = "donation", source = "static-site" }
 With Phoenixd configured, qpayd creates BOLT11 invoices and polls Phoenixd for
 incoming payment status during reconciliation.
 
-With `lightning_sweep` configured, qpayd periodically checks the Lightning
-balance and sends funds above `min_balance_sats` to the configured treasury
-descriptor, leaving `target_balance_sats` on the Lightning backend. Use a
-limited Phoenixd password for invoice creation and a separate full-access
+Run the sweep service separately from the payment daemon:
+
+```sh
+qpayd --config qpayd.toml sweep
+```
+
+With `lightning_sweep` configured, the sweep service periodically checks the
+Lightning balance and sends funds above `min_balance_sats` to the configured
+treasury descriptor, leaving `target_balance_sats` on the Lightning backend.
+Use a limited Phoenixd password for invoice creation and a separate full-access
 password only for sweeping.
 
 Run a manual sweep check with:
