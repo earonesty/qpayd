@@ -7,6 +7,9 @@ use crate::{
     invoice::{Invoice, InvoiceStatus},
 };
 
+const PHOENIXD_STARTUP_RETRY_ATTEMPTS: usize = 5;
+const PHOENIXD_STARTUP_RETRY_DELAY_MS: u64 = 500;
+
 #[derive(Debug, Clone)]
 pub struct LightningInvoice {
     pub bolt11: String,
@@ -210,17 +213,33 @@ async fn get_phoenixd_balance(
     client: &reqwest::Client,
     password: &str,
 ) -> anyhow::Result<PhoenixdBalanceResponse> {
-    client
-        .get(format!("{}/getbalance", config.url.trim_end_matches('/')))
-        .basic_auth("", Some(password))
-        .send()
-        .await
-        .context("phoenixd getbalance request failed")?
-        .error_for_status()
-        .context("phoenixd getbalance returned an error")?
-        .json()
-        .await
-        .context("failed to decode phoenixd getbalance response")
+    let url = format!("{}/getbalance", config.url.trim_end_matches('/'));
+    let mut last_error = None;
+
+    for attempt in 1..=PHOENIXD_STARTUP_RETRY_ATTEMPTS {
+        match client.get(&url).basic_auth("", Some(password)).send().await {
+            Ok(response) => {
+                return response
+                    .error_for_status()
+                    .context("phoenixd getbalance returned an error")?
+                    .json()
+                    .await
+                    .context("failed to decode phoenixd getbalance response");
+            }
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < PHOENIXD_STARTUP_RETRY_ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        PHOENIXD_STARTUP_RETRY_DELAY_MS,
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
+
+    Err(last_error.expect("phoenixd getbalance retry loop ran at least once"))
+        .context("phoenixd getbalance request failed")
 }
 
 fn sweep_decision(
