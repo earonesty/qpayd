@@ -31,6 +31,7 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(index))
         .route("/healthz", get(healthz))
         .route("/v1/stores/{store_id}/invoices", post(create_invoice))
         .route(
@@ -39,6 +40,30 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/i/{store_id}/{invoice_id}", get(checkout))
         .with_state(state)
+}
+
+async fn index() -> Html<&'static str> {
+    Html(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>qpayd</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; }
+    main { width: min(32rem, calc(100vw - 2rem)); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>qpayd</h1>
+    <p>Bitcoin and Lightning payment daemon.</p>
+  </main>
+</body>
+</html>"#,
+    )
 }
 
 async fn healthz() -> &'static str {
