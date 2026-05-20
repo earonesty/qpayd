@@ -64,7 +64,7 @@ async fn create_invoice(
         Some(onchain) => {
             let index = state.store.reserve_address_index(&store_id).await?;
             let descriptor = onchain
-                .descriptor
+                .descriptor()?
                 .parse::<Descriptor<DescriptorPublicKey>>()
                 .context("invalid on-chain descriptor")?;
             let secp = Secp256k1::verification_only();

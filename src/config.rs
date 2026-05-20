@@ -56,7 +56,8 @@ pub struct StoreConfig {
 pub struct OnchainConfig {
     #[serde(default = "default_network")]
     pub network: String,
-    pub descriptor: String,
+    pub descriptor: Option<String>,
+    pub descriptor_env: Option<String>,
     #[serde(default)]
     pub electrum_servers: Vec<String>,
 }
@@ -112,7 +113,7 @@ impl Config {
                     bail!("store {} on-chain config needs electrum_servers", store.id);
                 }
                 onchain
-                    .descriptor
+                    .descriptor()?
                     .parse::<miniscript::Descriptor<miniscript::DescriptorPublicKey>>()
                     .with_context(|| format!("invalid descriptor for store {}", store.id))?;
             }
@@ -155,6 +156,19 @@ impl StoreConfig {
             1
         } else {
             self.min_confirmations
+        }
+    }
+}
+
+impl OnchainConfig {
+    pub fn descriptor(&self) -> anyhow::Result<String> {
+        match (&self.descriptor, &self.descriptor_env) {
+            (Some(_), Some(_)) => bail!("use descriptor or descriptor_env, not both"),
+            (Some(descriptor), None) => Ok(descriptor.clone()),
+            (None, Some(env)) => {
+                std::env::var(env).with_context(|| format!("missing env var {}", env))
+            }
+            (None, None) => bail!("on-chain config requires descriptor or descriptor_env"),
         }
     }
 }

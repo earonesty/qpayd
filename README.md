@@ -47,7 +47,7 @@ min_confirmations = 1
 
 [stores.onchain]
 network = "bitcoin"
-descriptor = "wpkh([00000000/84h/0h/0h]xpub.../0/*)"
+descriptor_env = "QPAYD_MAIN_DESCRIPTOR"
 electrum_servers = ["ssl://electrum.blockstream.info:50002"]
 
 [stores.lightning]
@@ -60,6 +60,7 @@ Then set the token:
 
 ```sh
 export QPAYD_MAIN_API_TOKEN="$(openssl rand -hex 32)"
+export QPAYD_MAIN_DESCRIPTOR="wpkh([00000000/84h/0h/0h]xpub.../0/*)"
 ```
 
 Check and migrate:
