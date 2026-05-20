@@ -336,6 +336,13 @@ url = "postgres://postgres:postgres@localhost/qpayd"
 Postgres tables are prefixed with `qpayd_` so qpayd can use a shared database
 without creating generic table names.
 
+Migrations are sequential and recorded in the database. A new database runs all
+missing migrations in order. A database that already has migration `1` recorded
+will only run future migration `2`, `3`, and so on.
+
+SQLite records migrations in `schema_migrations`. Postgres records migrations
+in `qpayd_schema_migrations`.
+
 ## Releases
 
 GitHub Releases are published from `v*` tags after CI passes. The release
