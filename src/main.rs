@@ -21,7 +21,7 @@ use crate::{
     api::AppState,
     config::Config,
     pricing::KrakenRateSource,
-    storage::{SqliteStore, Store},
+    storage::{Store, connect_store},
 };
 
 #[derive(Debug, Parser)]
@@ -58,7 +58,8 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Serve => serve(config).await,
         Command::Migrate => {
-            let store = SqliteStore::connect(&config.database.url).await?;
+            config.validate()?;
+            let store = connect_store(&config.database.url).await?;
             store.migrate().await?;
             println!("database migrated");
             Ok(())
@@ -70,8 +71,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::SyncOnce => {
             config.validate()?;
-            let store = Arc::new(SqliteStore::connect(&config.database.url).await?);
-            store.migrate().await?;
+            let store = connect_store(&config.database.url).await?;
             sync_once(config, store).await
         }
     }
@@ -80,8 +80,10 @@ async fn main() -> anyhow::Result<()> {
 async fn serve(config: Config) -> anyhow::Result<()> {
     config.validate()?;
 
-    let store = Arc::new(SqliteStore::connect(&config.database.url).await?);
-    store.migrate().await?;
+    let store = connect_store(&config.database.url).await?;
+    if migrate_on_boot() {
+        store.migrate().await?;
+    }
 
     let state = AppState {
         config: Arc::new(config.clone()),
@@ -102,6 +104,17 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn migrate_on_boot() -> bool {
+    std::env::var("QPAYD_MIGRATE_ON_BOOT")
+        .map(|value| {
+            matches!(
+                value.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+        .unwrap_or(false)
 }
 
 async fn sync_loop(config: Config, store: Arc<dyn Store>) {
