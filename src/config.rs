@@ -83,8 +83,11 @@ impl Config {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
-        if !self.database.url.starts_with("sqlite:") {
-            bail!("only sqlite database urls are implemented in this build");
+        if !self.database.url.starts_with("sqlite:")
+            && !self.database.url.starts_with("postgres://")
+            && !self.database.url.starts_with("postgresql://")
+        {
+            bail!("database url must start with sqlite:, postgres://, or postgresql://");
         }
         if self.pricing.stale_after_seconds == 0 {
             bail!("pricing.stale_after_seconds must be greater than zero");

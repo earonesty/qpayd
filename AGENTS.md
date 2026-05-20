@@ -15,6 +15,8 @@ Treat this file as the local operating guide for future coding agents.
   should stay out of core usage docs unless explicitly requested.
 - Support many stores. Store configuration may be local config now and remote DB
   config later; avoid designs that assume one store forever.
+- SQLite and Postgres are supported storage engines. Postgres tables should stay
+  `qpayd_`-prefixed so users can point qpayd at a shared database.
 - Fiat pricing is important. Use configured third-party pricing sources, with
   Kraken as the default source unless the project changes direction.
 - Bitcoin plus Lightning both matter. Keep on-chain and Lightning behavior
@@ -59,6 +61,12 @@ cargo clippy --all-targets -- -D warnings
 
 ```sh
 cargo build --release --locked
+```
+
+- When changing storage behavior and local Postgres is available, run:
+
+```sh
+PG_URL=postgres://postgres:postgres@localhost/qpayd_test cargo test postgres_storage_contract
 ```
 
 ## Documentation Standards

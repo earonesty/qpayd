@@ -189,6 +189,12 @@ Run:
 qpayd --config qpayd.toml serve
 ```
 
+To run migrations automatically before the server starts, set:
+
+```sh
+export QPAYD_MIGRATE_ON_BOOT=true
+```
+
 Reconcile on-chain payments:
 
 ```sh
@@ -312,6 +318,23 @@ qpayd --config qpayd.toml migrate
 qpayd --config qpayd.toml serve
 qpayd --config qpayd.toml sync-once
 ```
+
+## Database
+
+SQLite and Postgres database URLs are supported:
+
+```toml
+[database]
+url = "sqlite:///data/qpayd.db"
+```
+
+```toml
+[database]
+url = "postgres://postgres:postgres@localhost/qpayd"
+```
+
+Postgres tables are prefixed with `qpayd_` so qpayd can use a shared database
+without creating generic table names.
 
 ## Releases
 

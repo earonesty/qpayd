@@ -12,6 +12,12 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
+Storage changes should also be tested against Postgres:
+
+```sh
+PG_URL=postgres://postgres:postgres@localhost/qpayd_test cargo test postgres_storage_contract
+```
+
 ## Releases
 
 Releases are created from version tags.
