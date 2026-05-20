@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>qpayd - Bitcoin payments without the heavy box</title>
+  <meta name="description" content="qpayd is a small open-source Bitcoin and Lightning payment daemon with fast warm starts, low memory use, fiat pricing, multiple stores, SQLite or Postgres, and signed webhooks.">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0a0d10;
+      --panel: #111820;
+      --panel-2: #17212b;
+      --text: #edf4f1;
+      --muted: #9fb0aa;
+      --line: #27343f;
+      --green: #6ee7a8;
+      --blue: #79b8ff;
+      --amber: #ffd166;
+      --red: #ff7b72;
+      --shadow: 0 24px 80px rgba(0, 0, 0, .32);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .shell {
+      width: min(1120px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      min-height: 72px;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+
+    .mark {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border: 1px solid rgba(110, 231, 168, .55);
+      background: #0f2119;
+      color: var(--green);
+      border-radius: 8px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .links {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .links a:hover {
+      color: var(--text);
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(360px, .95fr);
+      gap: 48px;
+      align-items: center;
+      padding: 68px 0 60px;
+      min-height: calc(100vh - 72px);
+    }
+
+    .eyebrow {
+      margin: 0 0 14px;
+      color: var(--green);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      max-width: 820px;
+      font-size: clamp(42px, 7vw, 82px);
+      line-height: .95;
+      letter-spacing: 0;
+    }
+
+    .lede {
+      max-width: 690px;
+      margin: 26px 0 0;
+      color: #c8d7d2;
+      font-size: clamp(18px, 2vw, 21px);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 34px;
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 46px;
+      padding: 0 18px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: #111820;
+      color: var(--text);
+      font-weight: 750;
+      cursor: pointer;
+      font: inherit;
+    }
+
+    .button.primary {
+      border-color: rgba(110, 231, 168, .7);
+      background: var(--green);
+      color: #08100c;
+    }
+
+    .hero-card {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .terminal-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      background: #0d1319;
+      color: var(--muted);
+      font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .dots {
+      display: flex;
+      gap: 7px;
+    }
+
+    .dots span {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--red);
+    }
+
+    .dots span:nth-child(2) {
+      background: var(--amber);
+    }
+
+    .dots span:nth-child(3) {
+      background: var(--green);
+    }
+
+    .terminal {
+      margin: 0;
+      padding: 22px;
+      min-height: 410px;
+      overflow: auto;
+      color: #d6e3df;
+      font: 14px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+    }
+
+    .terminal .dim { color: #80928c; }
+    .terminal .ok { color: var(--green); }
+    .terminal .blue { color: var(--blue); }
+    .terminal .amber { color: var(--amber); }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 1px;
+      border: 1px solid var(--line);
+      background: var(--line);
+      margin: 8px 0 72px;
+    }
+
+    .stat {
+      min-height: 118px;
+      padding: 22px;
+      background: var(--panel);
+    }
+
+    .stat strong {
+      display: block;
+      font-size: 27px;
+      line-height: 1.1;
+    }
+
+    .stat span {
+      display: block;
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .section {
+      padding: 64px 0;
+      border-top: 1px solid var(--line);
+    }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(0, .75fr) minmax(0, 1fr);
+      gap: 36px;
+      align-items: end;
+      margin-bottom: 28px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: clamp(30px, 4vw, 48px);
+      line-height: 1;
+      letter-spacing: 0;
+    }
+
+    .section-head p {
+      margin: 0;
+      color: #c8d7d2;
+      font-size: 17px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .tile {
+      min-height: 210px;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .tile h3 {
+      margin: 0 0 12px;
+      font-size: 20px;
+    }
+
+    .tile p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .tile code,
+    .terminal code {
+      color: var(--green);
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr);
+      gap: 18px;
+      align-items: stretch;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 24px;
+    }
+
+    .panel h3 {
+      margin: 0 0 14px;
+      font-size: 22px;
+    }
+
+    .panel p {
+      margin: 0 0 18px;
+      color: var(--muted);
+    }
+
+    .code {
+      margin: 0;
+      padding: 18px;
+      overflow: auto;
+      border-radius: 8px;
+      background: #0b1116;
+      border: 1px solid var(--line);
+      color: #d6e3df;
+      font: 13px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre;
+    }
+
+    .donate {
+      display: grid;
+      gap: 16px;
+      align-content: center;
+      min-height: 100%;
+      background: linear-gradient(135deg, #13231b 0%, #111820 48%, #17212b 100%);
+    }
+
+    .donate strong {
+      font-size: 30px;
+      line-height: 1.1;
+    }
+
+    .donate form {
+      margin: 0;
+    }
+
+    footer {
+      padding: 34px 0 44px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    @media (max-width: 900px) {
+      .hero,
+      .section-head,
+      .split {
+        grid-template-columns: 1fr;
+      }
+
+      .hero {
+        padding-top: 36px;
+        min-height: auto;
+      }
+
+      .stats,
+      .grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 620px) {
+      .links {
+        display: none;
+      }
+
+      .stats,
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .terminal {
+        min-height: 340px;
+        font-size: 12px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="shell nav">
+    <a class="brand" href="./" aria-label="qpayd home"><span class="mark">q</span><span>qpayd</span></a>
+    <nav class="links" aria-label="Primary">
+      <a href="#features">Features</a>
+      <a href="#stores">Stores</a>
+      <a href="#donate">Donate</a>
+      <a href="https://github.com/earonesty/qpayd">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="shell hero">
+      <div>
+        <p class="eyebrow">Open-source Bitcoin payments</p>
+        <h1>Small daemon. Serious checkout.</h1>
+        <p class="lede">
+          qpayd creates Bitcoin and Lightning invoices, locks fiat prices through configured pricing sources,
+          watches payments, and sends signed webhooks without making you run a heavy commerce stack.
+        </p>
+        <div class="actions">
+          <a class="button primary" href="https://github.com/earonesty/qpayd">View on GitHub</a>
+          <a class="button" href="#donate">Donate with Bitcoin</a>
+        </div>
+      </div>
+
+      <div class="hero-card" aria-label="qpayd terminal preview">
+        <div class="terminal-bar">
+          <div class="dots" aria-hidden="true"><span></span><span></span><span></span></div>
+          <span>qpayd serve</span>
+        </div>
+        <pre class="terminal"><code><span class="dim">$ qpayd serve --config qpayd.toml</span>
+<span class="ok">ok</span> migrated sqlite:///data/qpayd.db
+<span class="ok">ok</span> loaded stores: main, docs, side-projects
+<span class="ok">ok</span> pricing source: kraken BTC/USD
+<span class="blue">http</span> listening on 0.0.0.0:8080
+
+<span class="amber">invoice.created</span> store=docs currency=USD amount=10.00
+<span class="amber">invoice.addressed</span> method=bitcoin index=184
+<span class="ok">invoice.settled</span> method=lightning confirmations=0
+<span class="blue">webhook.delivered</span> status=200 attempt=1</code></pre>
+      </div>
+    </section>
+
+    <div class="shell stats" aria-label="qpayd highlights">
+      <div class="stat"><strong>Fast</strong><span>Built for quick warm starts and quiet idle deployments.</span></div>
+      <div class="stat"><strong>Small</strong><span>Low memory Rust service with no app code on the payment box.</span></div>
+      <div class="stat"><strong>Flexible</strong><span>SQLite for simple installs, Postgres when you outgrow a single node.</span></div>
+      <div class="stat"><strong>Multi-store</strong><span>One daemon can serve separate projects with separate tokens and webhooks.</span></div>
+    </div>
+
+    <section id="features" class="shell section">
+      <div class="section-head">
+        <h2>Clean payment glue.</h2>
+        <p>qpayd keeps the payment boundary boring: durable invoices, idempotent state changes, signed webhooks, fiat pricing, and wallet watching through public or private infrastructure.</p>
+      </div>
+      <div class="grid">
+        <article class="tile">
+          <h3>Bitcoin + Lightning</h3>
+          <p>Use descriptor-based on-chain receive addresses, Phoenixd-backed Lightning, or both for each configured store.</p>
+        </article>
+        <article class="tile">
+          <h3>Fiat amounts</h3>
+          <p>Quote in USD or another configured currency while qpayd locks the BTC amount from third-party pricing sources.</p>
+        </article>
+        <article class="tile">
+          <h3>Signed webhooks</h3>
+          <p>Your app receives payment events with HMAC signatures, retry handling, and durable delivery tracking.</p>
+        </article>
+        <article class="tile">
+          <h3>No browser secrets</h3>
+          <p>Static sites can use hosted payment links, and private API tokens stay on servers where they belong.</p>
+        </article>
+        <article class="tile">
+          <h3>Migrate on boot</h3>
+          <p>Sequential migrations make fresh deploys and long-lived installs predictable across SQLite and Postgres.</p>
+        </article>
+        <article class="tile">
+          <h3>Open source</h3>
+          <p>MIT licensed Rust glueware that can run anywhere a small daemon and a database can run.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="stores" class="shell section">
+      <div class="section-head">
+        <h2>One daemon, many stores.</h2>
+        <p>Each store owns its API token, wallet descriptor, checkout settings, webhook target, and static payment links.</p>
+      </div>
+      <div class="split">
+        <div class="panel">
+          <h3>Configure stores in TOML</h3>
+          <p>Start with one personal project. Add more stores when you need separate wallets, webhooks, or payment links.</p>
+          <pre class="code"><code>[[stores]]
+id = "docs"
+name = "Docs Donations"
+api_token_env = "QPAYD_DOCS_API_TOKEN"
+webhook_url = "https://example.com/qpayd"
+webhook_secret_env = "QPAYD_DOCS_WEBHOOK_SECRET"
+
+[[stores.payment_links]]
+id = "donate-10"
+amount = "10.00"
+currency = "USD"</code></pre>
+        </div>
+        <div id="donate" class="panel donate">
+          <strong>Send a small Bitcoin donation.</strong>
+          <p>This button uses qpayd's hosted payment-link flow. The page is static; the invoice is created only when you click.</p>
+          <form method="post" action="https://pay-q32.fly.dev/p/q32/qpayd-donate">
+            <button class="button primary" type="submit">Donate $10 in Bitcoin</button>
+          </form>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="shell">
+    <span>qpayd is MIT licensed and built at <a href="https://github.com/earonesty/qpayd">github.com/earonesty/qpayd</a>.</span>
+  </footer>
+</body>
+</html>
