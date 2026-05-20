@@ -4,7 +4,7 @@ use anyhow::Context;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
@@ -14,11 +14,10 @@ use miniscript::{Descriptor, DescriptorPublicKey};
 use qrcode::{QrCode, render::svg};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde::{Deserialize, Serialize};
-use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::{
-    config::Config,
+    config::{Config, PaymentLinkConfig, StoreConfig},
     events,
     invoice::{Invoice, InvoiceStatus},
     pricing::RateSource,
@@ -38,19 +37,19 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route(
             "/v1/public/stores/{store_id}/payment-links/{payment_link_id}/invoices",
-            post(create_public_payment_link_invoice),
+            post(create_public_payment_link_invoice).options(public_payment_link_invoice_preflight),
         )
         .route(
             "/v1/public/stores/{store_id}/invoices/{invoice_id}",
-            get(get_public_invoice),
+            get(get_public_invoice).options(public_invoice_preflight),
         )
         .route(
             "/v1/public/stores/{store_id}/invoices/{invoice_id}/qr/bitcoin.svg",
-            get(get_public_invoice_bitcoin_qr),
+            get(get_public_invoice_bitcoin_qr).options(public_invoice_preflight),
         )
         .route(
             "/v1/public/stores/{store_id}/invoices/{invoice_id}/qr/lightning.svg",
-            get(get_public_invoice_lightning_qr),
+            get(get_public_invoice_lightning_qr).options(public_invoice_preflight),
         )
         .route("/v1/stores/{store_id}/invoices", post(create_invoice))
         .route(
@@ -63,7 +62,6 @@ pub fn router(state: AppState) -> Router {
             "/v1/stores/{store_id}/events/{event_id}/replay",
             post(replay_event),
         )
-        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 
@@ -126,40 +124,54 @@ async fn create_invoice(
 async fn get_public_invoice(
     State(state): State<AppState>,
     Path((store_id, invoice_id)): Path<(String, Uuid)>,
-) -> Result<Json<PublicInvoiceResponse>, ApiError> {
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
     let store_cfg = state
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
+    let cors = public_cors_for_store(&state.config, store_cfg, &headers)?;
     let invoice = state
         .store
         .invoice(&store_id, invoice_id)
         .await?
         .ok_or(ApiError::not_found("invoice not found"))?;
 
-    Ok(Json(PublicInvoiceResponse::new(
-        invoice,
-        store_cfg.confirmations(),
-    )))
+    json_public_response(
+        PublicInvoiceResponse::new(invoice, store_cfg.confirmations()),
+        cors,
+    )
 }
 
 async fn get_public_invoice_bitcoin_qr(
     State(state): State<AppState>,
     Path((store_id, invoice_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    let cors = public_cors_for_store(&state.config, store_cfg, &headers)?;
     let invoice = state
         .store
         .invoice(&store_id, invoice_id)
         .await?
         .ok_or(ApiError::not_found("invoice not found"))?;
     let uri = bitcoin_uri(&invoice).ok_or(ApiError::not_found("invoice has no bitcoin address"))?;
-    svg_qr_response(&uri)
+    svg_qr_response(&uri, cors)
 }
 
 async fn get_public_invoice_lightning_qr(
     State(state): State<AppState>,
     Path((store_id, invoice_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    let cors = public_cors_for_store(&state.config, store_cfg, &headers)?;
     let invoice = state
         .store
         .invoice(&store_id, invoice_id)
@@ -167,13 +179,14 @@ async fn get_public_invoice_lightning_qr(
         .ok_or(ApiError::not_found("invoice not found"))?;
     let uri =
         lightning_uri(&invoice).ok_or(ApiError::not_found("invoice has no lightning invoice"))?;
-    svg_qr_response(&uri)
+    svg_qr_response(&uri, cors)
 }
 
 async fn create_public_payment_link_invoice(
     State(state): State<AppState>,
     Path((store_id, payment_link_id)): Path<(String, String)>,
-) -> Result<Json<PublicInvoiceResponse>, ApiError> {
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
     let store_cfg = state
         .config
         .store(&store_id)
@@ -181,6 +194,7 @@ async fn create_public_payment_link_invoice(
     let payment_link = store_cfg
         .payment_link(&payment_link_id)
         .ok_or(ApiError::not_found("payment link not found"))?;
+    let cors = public_cors_for_payment_link(&state.config, store_cfg, payment_link, &headers)?;
 
     let invoice = build_invoice(
         &state,
@@ -192,10 +206,39 @@ async fn create_public_payment_link_invoice(
     )
     .await?;
 
-    Ok(Json(PublicInvoiceResponse::new(
-        invoice,
-        store_cfg.confirmations(),
-    )))
+    json_public_response(
+        PublicInvoiceResponse::new(invoice, store_cfg.confirmations()),
+        cors,
+    )
+}
+
+async fn public_payment_link_invoice_preflight(
+    State(state): State<AppState>,
+    Path((store_id, payment_link_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    let payment_link = store_cfg
+        .payment_link(&payment_link_id)
+        .ok_or(ApiError::not_found("payment link not found"))?;
+    let cors = public_cors_for_payment_link(&state.config, store_cfg, payment_link, &headers)?;
+    Ok(preflight_response(cors))
+}
+
+async fn public_invoice_preflight(
+    State(state): State<AppState>,
+    Path((store_id, _invoice_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    let cors = public_cors_for_store(&state.config, store_cfg, &headers)?;
+    Ok(preflight_response(cors))
 }
 
 async fn build_invoice(
@@ -407,7 +450,128 @@ fn lightning_uri(invoice: &Invoice) -> Option<String> {
         .map(|bolt11| format!("lightning:{bolt11}"))
 }
 
-fn svg_qr_response(value: &str) -> Result<Response, ApiError> {
+#[derive(Debug, Clone)]
+enum PublicCors {
+    AnyOrigin,
+    Origin(HeaderValue),
+    NoBrowserOrigin,
+}
+
+fn public_cors_for_payment_link(
+    config: &Config,
+    store: &StoreConfig,
+    payment_link: &PaymentLinkConfig,
+    headers: &HeaderMap,
+) -> Result<PublicCors, ApiError> {
+    public_cors_for_allowed_origins(
+        most_specific_allowed_origins(
+            &config.server.public_allowed_origins,
+            &store.public_allowed_origins,
+            &payment_link.public_allowed_origins,
+        ),
+        headers,
+    )
+}
+
+fn public_cors_for_store(
+    config: &Config,
+    store: &StoreConfig,
+    headers: &HeaderMap,
+) -> Result<PublicCors, ApiError> {
+    public_cors_for_allowed_origins(
+        most_specific_allowed_origins(
+            &config.server.public_allowed_origins,
+            &store.public_allowed_origins,
+            &[],
+        ),
+        headers,
+    )
+}
+
+fn most_specific_allowed_origins<'a>(
+    server: &'a [String],
+    store: &'a [String],
+    payment_link: &'a [String],
+) -> &'a [String] {
+    if !payment_link.is_empty() {
+        payment_link
+    } else if !store.is_empty() {
+        store
+    } else {
+        server
+    }
+}
+
+fn public_cors_for_allowed_origins(
+    allowed_origins: &[String],
+    headers: &HeaderMap,
+) -> Result<PublicCors, ApiError> {
+    if allowed_origins.is_empty() {
+        return Ok(PublicCors::AnyOrigin);
+    }
+
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return Ok(PublicCors::NoBrowserOrigin);
+    };
+    let origin_str = origin
+        .to_str()
+        .map_err(|_| ApiError::forbidden("origin not allowed"))?;
+
+    if allowed_origins
+        .iter()
+        .any(|allowed| same_origin(allowed, origin_str))
+    {
+        Ok(PublicCors::Origin(origin.clone()))
+    } else {
+        Err(ApiError::forbidden("origin not allowed"))
+    }
+}
+
+fn same_origin(configured: &str, request_origin: &str) -> bool {
+    configured.trim_end_matches('/') == request_origin.trim_end_matches('/')
+}
+
+fn json_public_response<T: Serialize>(value: T, cors: PublicCors) -> Result<Response, ApiError> {
+    let mut response = Json(value).into_response();
+    add_public_cors_headers(response.headers_mut(), cors);
+    Ok(response)
+}
+
+fn preflight_response(cors: PublicCors) -> Response {
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    add_public_cors_headers(response.headers_mut(), cors);
+    response
+}
+
+fn add_public_cors_headers(headers: &mut HeaderMap, cors: PublicCors) {
+    match cors {
+        PublicCors::AnyOrigin => {
+            headers.insert(
+                header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                HeaderValue::from_static("*"),
+            );
+        }
+        PublicCors::Origin(origin) => {
+            headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+            headers.insert(header::VARY, HeaderValue::from_static("origin"));
+        }
+        PublicCors::NoBrowserOrigin => {}
+    }
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET,POST,OPTIONS"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("content-type"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("content-type"),
+    );
+}
+
+fn svg_qr_response(value: &str, cors: PublicCors) -> Result<Response, ApiError> {
     let code = QrCode::new(value.as_bytes()).map_err(|error| ApiError {
         status: StatusCode::BAD_REQUEST,
         message: error.to_string(),
@@ -418,12 +582,14 @@ fn svg_qr_response(value: &str) -> Result<Response, ApiError> {
         .dark_color(svg::Color("#08100c"))
         .light_color(svg::Color("#ffffff"))
         .build();
-    Ok((
+    let mut response = (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")],
         body,
     )
-        .into_response())
+        .into_response();
+    add_public_cors_headers(response.headers_mut(), cors);
+    Ok(response)
 }
 
 #[derive(Debug, Deserialize)]
@@ -601,6 +767,13 @@ impl ApiError {
         }
     }
 
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.into(),
+        }
+    }
+
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -744,8 +917,152 @@ mod tests {
         assert!(std::str::from_utf8(&qr_body).unwrap().contains("<svg"));
     }
 
+    #[tokio::test]
+    async fn public_payment_link_is_cors_permissive_by_default() {
+        let app = test_app().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/public/stores/main/payment-links/donate-10/invoices")
+                    .header(header::ORIGIN, "https://any.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+    }
+
+    #[tokio::test]
+    async fn public_payment_link_allows_configured_origin() {
+        let mut config = test_config();
+        config.stores[0].payment_links[0].public_allowed_origins =
+            vec!["https://shop.example".to_string()];
+        let app = test_app_with_config(config).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/public/stores/main/payment-links/donate-10/invoices")
+                    .header(header::ORIGIN, "https://shop.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "https://shop.example"
+        );
+        assert_eq!(response.headers()[header::VARY], "origin");
+    }
+
+    #[tokio::test]
+    async fn public_payment_link_rejects_disallowed_origin() {
+        let mut config = test_config();
+        config.stores[0].payment_links[0].public_allowed_origins =
+            vec!["https://shop.example".to_string()];
+        let app = test_app_with_config(config).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/public/stores/main/payment-links/donate-10/invoices")
+                    .header(header::ORIGIN, "https://other.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn public_payment_link_allows_server_side_requests_without_origin() {
+        let mut config = test_config();
+        config.stores[0].payment_links[0].public_allowed_origins =
+            vec!["https://shop.example".to_string()];
+        let app = test_app_with_config(config).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/public/stores/main/payment-links/donate-10/invoices")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn public_preflight_uses_configured_origin_policy() {
+        let mut config = test_config();
+        config.stores[0].payment_links[0].public_allowed_origins =
+            vec!["https://shop.example".to_string()];
+        let app = test_app_with_config(config).await;
+
+        let allowed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/v1/public/stores/main/payment-links/donate-10/invoices")
+                    .header(header::ORIGIN, "https://shop.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            allowed.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "https://shop.example"
+        );
+
+        let rejected = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/v1/public/stores/main/payment-links/donate-10/invoices")
+                    .header(header::ORIGIN, "https://other.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    }
+
     async fn test_app() -> axum::Router {
-        let config = test_config();
+        test_app_with_config(test_config()).await
+    }
+
+    async fn test_app_with_config(config: Config) -> axum::Router {
         let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
         store.migrate().await.unwrap();
         router(AppState {

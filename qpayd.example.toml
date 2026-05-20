@@ -1,6 +1,7 @@
 [server]
 listen = "127.0.0.1:8080"
 onchain_poll_seconds = 30
+# public_allowed_origins = ["https://example.com"]
 
 [database]
 url = "sqlite://qpayd.db"
@@ -15,6 +16,7 @@ name = "Main Store"
 api_token_env = "QPAYD_MAIN_API_TOKEN"
 invoice_expiry_minutes = 15
 min_confirmations = 1
+# public_allowed_origins = ["https://example.com"]
 
 [stores.onchain]
 network = "bitcoin"
