@@ -1,6 +1,7 @@
 use std::{collections::HashSet, fs, path::Path};
 
 use anyhow::{Context, bail};
+use rust_decimal::Decimal;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -50,6 +51,17 @@ pub struct StoreConfig {
     pub min_confirmations: u32,
     pub onchain: Option<OnchainConfig>,
     pub lightning: Option<LightningConfig>,
+    #[serde(default)]
+    pub payment_links: Vec<PaymentLinkConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PaymentLinkConfig {
+    pub id: String,
+    pub amount: Decimal,
+    pub currency: String,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -110,6 +122,40 @@ impl Config {
             if store.onchain.is_none() && store.lightning.is_none() {
                 bail!("store {} has no payment methods", store.id);
             }
+            let mut payment_link_ids = HashSet::new();
+            for payment_link in &store.payment_links {
+                if payment_link.id.trim().is_empty() {
+                    bail!("store {} payment link id cannot be empty", store.id);
+                }
+                if payment_link.id.contains('/') {
+                    bail!(
+                        "store {} payment link {} cannot contain /",
+                        store.id,
+                        payment_link.id
+                    );
+                }
+                if !payment_link_ids.insert(payment_link.id.as_str()) {
+                    bail!(
+                        "store {} has duplicate payment link id {}",
+                        store.id,
+                        payment_link.id
+                    );
+                }
+                if payment_link.amount <= Decimal::ZERO {
+                    bail!(
+                        "store {} payment link {} amount must be positive",
+                        store.id,
+                        payment_link.id
+                    );
+                }
+                if payment_link.currency.trim().is_empty() {
+                    bail!(
+                        "store {} payment link {} currency cannot be empty",
+                        store.id,
+                        payment_link.id
+                    );
+                }
+            }
             if let Some(onchain) = &store.onchain {
                 onchain.network.parse::<bitcoin::Network>()?;
                 if onchain.electrum_servers.is_empty() {
@@ -160,6 +206,10 @@ impl StoreConfig {
         } else {
             self.min_confirmations
         }
+    }
+
+    pub fn payment_link(&self, id: &str) -> Option<&PaymentLinkConfig> {
+        self.payment_links.iter().find(|link| link.id == id)
     }
 }
 
@@ -217,4 +267,78 @@ fn default_rate_ttl_seconds() -> u64 {
 
 fn default_network() -> String {
     "bitcoin".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn validates_public_payment_links() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+
+            [[stores.payment_links]]
+            id = "donate-10"
+            amount = "10.00"
+            currency = "USD"
+            metadata = { kind = "donation" }
+            "#,
+        )
+        .unwrap();
+
+        config.validate().unwrap();
+        let link = config
+            .store("main")
+            .unwrap()
+            .payment_link("donate-10")
+            .unwrap();
+        assert_eq!(link.currency, "USD");
+        assert_eq!(link.metadata["kind"], "donation");
+    }
+
+    #[test]
+    fn rejects_duplicate_public_payment_links() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+
+            [[stores.payment_links]]
+            id = "donate"
+            amount = "10.00"
+            currency = "USD"
+
+            [[stores.payment_links]]
+            id = "donate"
+            amount = "20.00"
+            currency = "USD"
+            "#,
+        )
+        .unwrap();
+
+        assert!(config.validate().is_err());
+    }
 }
