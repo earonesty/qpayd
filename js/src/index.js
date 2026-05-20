@@ -1,5 +1,8 @@
 const DEFAULT_POLL_INTERVAL_MS = 2500;
 const TERMINAL_STATUSES = new Set(["settled", "expired", "paid_late", "invalid"]);
+const ABBREVIATE_AT = 48;
+const ABBREVIATE_HEAD = 18;
+const ABBREVIATE_TAIL = 14;
 
 export class QPaydClient {
   constructor(options) {
@@ -98,13 +101,18 @@ export function openInvoiceModal(options) {
   root.querySelectorAll("[data-qpayd-copy]").forEach((button) => {
     button.addEventListener("click", async () => {
       const target = root.querySelector(button.getAttribute("data-qpayd-copy"));
-      const value = target?.textContent?.trim();
+      const value = target?.dataset.qpaydFullValue ?? target?.textContent?.trim();
       if (!value) return;
       await navigator.clipboard.writeText(value);
       button.textContent = "Copied";
       window.setTimeout(() => {
         button.textContent = "Copy";
       }, 1200);
+    });
+  });
+  root.querySelectorAll("[data-qpayd-value]").forEach((button) => {
+    button.addEventListener("click", () => {
+      toggleValue(button);
     });
   });
   root.querySelectorAll("[data-qpayd-method]").forEach((button) => {
@@ -166,7 +174,7 @@ function renderMethod(root, client, method, payment, valueKey) {
   }
   tab.hidden = false;
   panel.querySelector("[data-qpayd-qr]").src = client.resolveUrl(payment.qr_svg_url);
-  panel.querySelector("[data-qpayd-value]").textContent = payment[valueKey];
+  setPaymentValue(panel.querySelector("[data-qpayd-value]"), payment[valueKey]);
   panel.querySelector("[data-qpayd-uri]").href = payment.uri;
 }
 
@@ -201,7 +209,7 @@ function modalHtml(invoice) {
       </nav>
       <div class="qpayd-panel" data-qpayd-panel="bitcoin">
         <img data-qpayd-qr alt="Bitcoin payment QR code">
-        <code data-qpayd-value></code>
+        <button type="button" class="qpayd-value" data-qpayd-value aria-label="Show full Bitcoin payment value"></button>
         <div class="qpayd-actions">
           <button type="button" data-qpayd-copy='[data-qpayd-panel="bitcoin"] [data-qpayd-value]'>Copy</button>
           <a data-qpayd-uri>Open wallet</a>
@@ -209,7 +217,7 @@ function modalHtml(invoice) {
       </div>
       <div class="qpayd-panel" data-qpayd-panel="lightning">
         <img data-qpayd-qr alt="Lightning payment QR code">
-        <code data-qpayd-value></code>
+        <button type="button" class="qpayd-value" data-qpayd-value aria-label="Show full Lightning invoice"></button>
         <div class="qpayd-actions">
           <button type="button" data-qpayd-copy='[data-qpayd-panel="lightning"] [data-qpayd-value]'>Copy</button>
           <a data-qpayd-uri>Open wallet</a>
@@ -239,12 +247,34 @@ function formatExpiry(value) {
   return `Expires ${expires.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
 }
 
+function setPaymentValue(element, value) {
+  element.dataset.qpaydFullValue = value;
+  element.dataset.qpaydExpanded = "false";
+  element.textContent = abbreviate(value);
+  element.title = value.length > ABBREVIATE_AT ? "Click to show full value" : "";
+}
+
+function toggleValue(element) {
+  const value = element.dataset.qpaydFullValue ?? "";
+  if (!value || value.length <= ABBREVIATE_AT) return;
+  const expanded = element.dataset.qpaydExpanded === "true";
+  element.dataset.qpaydExpanded = String(!expanded);
+  element.textContent = expanded ? abbreviate(value) : value;
+  element.title = expanded ? "Click to show full value" : "Click to abbreviate";
+}
+
+function abbreviate(value) {
+  if (value.length <= ABBREVIATE_AT) return value;
+  return `${value.slice(0, ABBREVIATE_HEAD)}...${value.slice(-ABBREVIATE_TAIL)}`;
+}
+
 function installStyles() {
   if (document.getElementById("qpayd-modal-styles")) return;
   const style = document.createElement("style");
   style.id = "qpayd-modal-styles";
   style.textContent = `
     .qpayd-modal-root { position: fixed; inset: 0; z-index: 9999; display: grid; place-items: center; padding: 16px; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #edf4f1; }
+    .qpayd-modal-root * { box-sizing: border-box; }
     .qpayd-backdrop { position: absolute; inset: 0; background: rgba(3, 7, 10, .72); backdrop-filter: blur(8px); }
     .qpayd-modal { position: relative; width: min(420px, 100%); max-height: min(720px, calc(100vh - 32px)); overflow: auto; border: 1px solid #27343f; border-radius: 8px; background: #111820; box-shadow: 0 24px 80px rgba(0,0,0,.38); }
     .qpayd-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px; border-bottom: 1px solid #27343f; }
@@ -260,7 +290,8 @@ function installStyles() {
     .qpayd-panel { padding: 18px; }
     .qpayd-panel[hidden], .qpayd-tabs button[hidden] { display: none; }
     .qpayd-panel img { display: block; width: min(260px, 100%); aspect-ratio: 1; margin: 0 auto 16px; border-radius: 8px; background: #fff; }
-    .qpayd-panel code { display: block; padding: 12px; min-height: 48px; border: 1px solid #27343f; border-radius: 8px; background: #0b1116; color: #d6e3df; overflow-wrap: anywhere; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .qpayd-value { display: block; width: 100%; padding: 12px; min-height: 44px; border: 1px solid #27343f; border-radius: 8px; background: #0b1116; color: #d6e3df; overflow-wrap: anywhere; text-align: left; cursor: pointer; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .qpayd-value[data-qpayd-expanded="true"] { max-height: 112px; overflow: auto; }
     .qpayd-actions { display: flex; gap: 10px; margin-top: 12px; }
     .qpayd-actions button, .qpayd-actions a { flex: 1; display: inline-flex; align-items: center; justify-content: center; min-height: 40px; border: 1px solid #27343f; border-radius: 8px; background: #17212b; color: #edf4f1; text-decoration: none; cursor: pointer; font: inherit; }
     .qpayd-note { margin: 0; padding: 0 18px 18px; color: #9fb0aa; font-size: 13px; }
