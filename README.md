@@ -108,7 +108,7 @@ Or as a deployment secret:
 flyctl secrets set QPAYD_MAIN_DESCRIPTOR='wpkh(xpub.../0/*)' --app your-app
 ```
 
-### Blockstream Green / Blockstream App
+### Blockstream Apps
 
 Use a singlesig Bitcoin account.
 
