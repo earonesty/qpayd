@@ -107,108 +107,7 @@ impl PostgresStore {
 #[async_trait]
 impl Store for SqliteStore {
     async fn migrate(&self) -> anyhow::Result<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS store_counters (
-                store_id TEXT PRIMARY KEY NOT NULL,
-                next_onchain_index INTEGER NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS invoices (
-                id TEXT PRIMARY KEY NOT NULL,
-                store_id TEXT NOT NULL,
-                status TEXT NOT NULL,
-                amount TEXT NOT NULL,
-                currency TEXT NOT NULL,
-                btc_amount_sats INTEGER NOT NULL,
-                onchain_address TEXT,
-                onchain_address_index INTEGER,
-                onchain_script_pubkey TEXT,
-                lightning_bolt11 TEXT,
-                lightning_payment_hash TEXT,
-                rate_source TEXT NOT NULL,
-                rate TEXT NOT NULL,
-                metadata TEXT NOT NULL,
-                checkout_url TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS invoices_store_created_idx
-            ON invoices (store_id, created_at)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS events (
-                id TEXT PRIMARY KEY NOT NULL,
-                store_id TEXT NOT NULL,
-                invoice_id TEXT,
-                type TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS events_store_created_idx
-            ON events (store_id, created_at)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS webhook_deliveries (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_id TEXT NOT NULL,
-                store_id TEXT NOT NULL,
-                url TEXT NOT NULL,
-                status TEXT NOT NULL,
-                attempts INTEGER NOT NULL,
-                next_attempt_at TEXT NOT NULL,
-                last_error TEXT,
-                delivered_at TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY(event_id) REFERENCES events(id)
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS webhook_deliveries_due_idx
-            ON webhook_deliveries (status, next_attempt_at)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        migrate_sqlite(&self.pool).await
     }
 
     async fn reserve_address_index(&self, store_id: &str) -> anyhow::Result<u32> {
@@ -532,107 +431,7 @@ impl Store for SqliteStore {
 #[async_trait]
 impl Store for PostgresStore {
     async fn migrate(&self) -> anyhow::Result<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS qpayd_store_counters (
-                store_id TEXT PRIMARY KEY NOT NULL,
-                next_onchain_index BIGINT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS qpayd_invoices (
-                id TEXT PRIMARY KEY NOT NULL,
-                store_id TEXT NOT NULL,
-                status TEXT NOT NULL,
-                amount TEXT NOT NULL,
-                currency TEXT NOT NULL,
-                btc_amount_sats BIGINT NOT NULL,
-                onchain_address TEXT,
-                onchain_address_index BIGINT,
-                onchain_script_pubkey TEXT,
-                lightning_bolt11 TEXT,
-                lightning_payment_hash TEXT,
-                rate_source TEXT NOT NULL,
-                rate TEXT NOT NULL,
-                metadata TEXT NOT NULL,
-                checkout_url TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS qpayd_invoices_store_created_idx
-            ON qpayd_invoices (store_id, created_at)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS qpayd_events (
-                id TEXT PRIMARY KEY NOT NULL,
-                store_id TEXT NOT NULL,
-                invoice_id TEXT,
-                type TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS qpayd_events_store_created_idx
-            ON qpayd_events (store_id, created_at)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS qpayd_webhook_deliveries (
-                id BIGSERIAL PRIMARY KEY,
-                event_id TEXT NOT NULL REFERENCES qpayd_events(id),
-                store_id TEXT NOT NULL,
-                url TEXT NOT NULL,
-                status TEXT NOT NULL,
-                attempts BIGINT NOT NULL,
-                next_attempt_at TEXT NOT NULL,
-                last_error TEXT,
-                delivered_at TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS qpayd_webhook_deliveries_due_idx
-            ON qpayd_webhook_deliveries (status, next_attempt_at)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        migrate_postgres(&self.pool).await
     }
 
     async fn reserve_address_index(&self, store_id: &str) -> anyhow::Result<u32> {
@@ -953,6 +752,255 @@ impl Store for PostgresStore {
     }
 }
 
+struct Migration {
+    version: i64,
+    name: &'static str,
+    statements: &'static [&'static str],
+}
+
+const SQLITE_MIGRATIONS: &[Migration] = &[Migration {
+    version: 1,
+    name: "initial_schema",
+    statements: &[
+        r#"
+        CREATE TABLE IF NOT EXISTS store_counters (
+            store_id TEXT PRIMARY KEY NOT NULL,
+            next_onchain_index INTEGER NOT NULL
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS invoices (
+            id TEXT PRIMARY KEY NOT NULL,
+            store_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            amount TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            btc_amount_sats INTEGER NOT NULL,
+            onchain_address TEXT,
+            onchain_address_index INTEGER,
+            onchain_script_pubkey TEXT,
+            lightning_bolt11 TEXT,
+            lightning_payment_hash TEXT,
+            rate_source TEXT NOT NULL,
+            rate TEXT NOT NULL,
+            metadata TEXT NOT NULL,
+            checkout_url TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS invoices_store_created_idx
+        ON invoices (store_id, created_at)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS events (
+            id TEXT PRIMARY KEY NOT NULL,
+            store_id TEXT NOT NULL,
+            invoice_id TEXT,
+            type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS events_store_created_idx
+        ON events (store_id, created_at)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS webhook_deliveries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL,
+            store_id TEXT NOT NULL,
+            url TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL,
+            next_attempt_at TEXT NOT NULL,
+            last_error TEXT,
+            delivered_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(event_id) REFERENCES events(id)
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS webhook_deliveries_due_idx
+        ON webhook_deliveries (status, next_attempt_at)
+        "#,
+    ],
+}];
+
+const POSTGRES_MIGRATIONS: &[Migration] = &[Migration {
+    version: 1,
+    name: "initial_schema",
+    statements: &[
+        r#"
+        CREATE TABLE IF NOT EXISTS qpayd_store_counters (
+            store_id TEXT PRIMARY KEY NOT NULL,
+            next_onchain_index BIGINT NOT NULL
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS qpayd_invoices (
+            id TEXT PRIMARY KEY NOT NULL,
+            store_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            amount TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            btc_amount_sats BIGINT NOT NULL,
+            onchain_address TEXT,
+            onchain_address_index BIGINT,
+            onchain_script_pubkey TEXT,
+            lightning_bolt11 TEXT,
+            lightning_payment_hash TEXT,
+            rate_source TEXT NOT NULL,
+            rate TEXT NOT NULL,
+            metadata TEXT NOT NULL,
+            checkout_url TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS qpayd_invoices_store_created_idx
+        ON qpayd_invoices (store_id, created_at)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS qpayd_events (
+            id TEXT PRIMARY KEY NOT NULL,
+            store_id TEXT NOT NULL,
+            invoice_id TEXT,
+            type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS qpayd_events_store_created_idx
+        ON qpayd_events (store_id, created_at)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS qpayd_webhook_deliveries (
+            id BIGSERIAL PRIMARY KEY,
+            event_id TEXT NOT NULL REFERENCES qpayd_events(id),
+            store_id TEXT NOT NULL,
+            url TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempts BIGINT NOT NULL,
+            next_attempt_at TEXT NOT NULL,
+            last_error TEXT,
+            delivered_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS qpayd_webhook_deliveries_due_idx
+        ON qpayd_webhook_deliveries (status, next_attempt_at)
+        "#,
+    ],
+}];
+
+async fn migrate_sqlite(pool: &SqlitePool) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let applied = applied_sqlite_migrations(pool).await?;
+    for migration in SQLITE_MIGRATIONS {
+        if applied.contains(&migration.version) {
+            continue;
+        }
+        let mut tx = pool.begin().await?;
+        for statement in migration.statements {
+            sqlx::query(statement).execute(&mut *tx).await?;
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO schema_migrations (version, name, applied_at)
+            VALUES (?, ?, ?)
+            "#,
+        )
+        .bind(migration.version)
+        .bind(migration.name)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    }
+
+    Ok(())
+}
+
+async fn migrate_postgres(pool: &PgPool) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS qpayd_schema_migrations (
+            version BIGINT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let applied = applied_pg_migrations(pool).await?;
+    for migration in POSTGRES_MIGRATIONS {
+        if applied.contains(&migration.version) {
+            continue;
+        }
+        let mut tx = pool.begin().await?;
+        for statement in migration.statements {
+            sqlx::query(statement).execute(&mut *tx).await?;
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO qpayd_schema_migrations (version, name, applied_at)
+            VALUES ($1, $2, $3)
+            "#,
+        )
+        .bind(migration.version)
+        .bind(migration.name)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    }
+
+    Ok(())
+}
+
+async fn applied_sqlite_migrations(pool: &SqlitePool) -> anyhow::Result<Vec<i64>> {
+    let rows = sqlx::query("SELECT version FROM schema_migrations ORDER BY version")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| row.get::<i64, _>("version"))
+        .collect())
+}
+
+async fn applied_pg_migrations(pool: &PgPool) -> anyhow::Result<Vec<i64>> {
+    let rows = sqlx::query("SELECT version FROM qpayd_schema_migrations ORDER BY version")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| row.get::<i64, _>("version"))
+        .collect())
+}
+
 fn insert_event_query(
     event: &EventEnvelope,
 ) -> sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> {
@@ -1128,6 +1176,7 @@ fn pg_webhook_delivery_from_row(
 mod tests {
     use chrono::{Duration, Utc};
     use rust_decimal::Decimal;
+    use sqlx::Row;
     use uuid::Uuid;
 
     use super::{PostgresStore, SqliteStore, Store};
@@ -1155,10 +1204,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_migrate_records_initial_schema_once() {
+        let path = std::env::temp_dir().join(format!("qpayd-migration-test-{}.db", Uuid::new_v4()));
+        let store = SqliteStore::connect(&format!("sqlite://{}", path.display()))
+            .await
+            .unwrap();
+
+        store.migrate().await.unwrap();
+        store.migrate().await.unwrap();
+
+        let rows = sqlx::query("SELECT version, name FROM schema_migrations ORDER BY version")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get::<i64, _>("version"), 1);
+        assert_eq!(rows[0].get::<String, _>("name"), "initial_schema");
+    }
+
+    #[tokio::test]
     async fn postgres_storage_contract() {
         let Some(store) = pg_test_store().await else {
             return;
         };
+
+        let rows =
+            sqlx::query("SELECT version, name FROM qpayd_schema_migrations ORDER BY version")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get::<i64, _>("version"), 1);
+        assert_eq!(rows[0].get::<String, _>("name"), "initial_schema");
 
         clean_pg_store(&store).await;
         insert_invoice_persists_event_and_webhook_delivery_for(&store).await;
@@ -1263,8 +1340,26 @@ mod tests {
     async fn pg_test_store() -> Option<PostgresStore> {
         let url = std::env::var("PG_URL").ok()?;
         let store = PostgresStore::connect(&url).await.unwrap();
+        reset_pg_store(&store).await;
+        store.migrate().await.unwrap();
         store.migrate().await.unwrap();
         Some(store)
+    }
+
+    async fn reset_pg_store(store: &PostgresStore) {
+        sqlx::query(
+            r#"
+            DROP TABLE IF EXISTS
+                qpayd_webhook_deliveries,
+                qpayd_events,
+                qpayd_invoices,
+                qpayd_store_counters,
+                qpayd_schema_migrations
+            "#,
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
     }
 
     async fn clean_pg_store(store: &PostgresStore) {

@@ -17,6 +17,8 @@ Treat this file as the local operating guide for future coding agents.
   config later; avoid designs that assume one store forever.
 - SQLite and Postgres are supported storage engines. Postgres tables should stay
   `qpayd_`-prefixed so users can point qpayd at a shared database.
+- Database migrations must remain sequential and recorded. A database that has
+  already run migration `1` should only run later missing migrations.
 - Fiat pricing is important. Use configured third-party pricing sources, with
   Kraken as the default source unless the project changes direction.
 - Bitcoin plus Lightning both matter. Keep on-chain and Lightning behavior
