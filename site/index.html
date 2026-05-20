@@ -199,13 +199,18 @@
     .terminal .blue { color: var(--blue); }
     .terminal .amber { color: var(--amber); }
 
+    .stats-band {
+      padding: 0 0 72px;
+    }
+
     .stats {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 1px;
+      max-width: 1040px;
       border: 1px solid var(--line);
       background: var(--line);
-      margin: 8px 0 72px;
+      margin: 8px auto 0;
     }
 
     .stat {
@@ -421,12 +426,14 @@
       </div>
     </section>
 
-    <div class="shell stats" aria-label="qpayd highlights">
-      <div class="stat"><strong>Fast</strong><span>Built for quick warm starts and quiet idle deployments.</span></div>
-      <div class="stat"><strong>Small</strong><span>Low memory Rust service with no app code on the payment box.</span></div>
-      <div class="stat"><strong>Flexible</strong><span>SQLite for simple installs, Postgres when you outgrow a single node.</span></div>
-      <div class="stat"><strong>Multi-store</strong><span>One daemon can serve separate projects with separate tokens and webhooks.</span></div>
-    </div>
+    <section class="stats-band" aria-label="qpayd highlights">
+      <div class="shell stats">
+        <div class="stat"><strong>Fast</strong><span>Built for quick warm starts and quiet idle deployments.</span></div>
+        <div class="stat"><strong>Small</strong><span>Low memory Rust service with no app code on the payment box.</span></div>
+        <div class="stat"><strong>Flexible</strong><span>SQLite for simple installs, Postgres when you outgrow a single node.</span></div>
+        <div class="stat"><strong>Multi-store</strong><span>One daemon can serve separate projects with separate tokens and webhooks.</span></div>
+      </div>
+    </section>
 
     <section id="features" class="shell section">
       <div class="section-head">
