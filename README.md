@@ -295,6 +295,18 @@ qpayd --config qpayd.toml serve
 qpayd --config qpayd.toml sync-once
 ```
 
+## Releases
+
+GitHub Releases are published from `v*` tags after CI passes. The release
+contains a Linux x86_64 binary tarball and `SHA256SUMS`.
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Use pull requests for changes so generated release notes have useful history.
+
 ## License
 
 MIT
