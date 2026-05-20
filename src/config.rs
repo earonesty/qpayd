@@ -21,6 +21,8 @@ pub struct ServerConfig {
     pub listen: String,
     #[serde(default = "default_onchain_poll_seconds")]
     pub onchain_poll_seconds: u64,
+    #[serde(default)]
+    pub public_allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -41,6 +43,8 @@ pub struct StoreConfig {
     pub id: String,
     pub name: String,
     pub api_token_env: String,
+    #[serde(default)]
+    pub public_allowed_origins: Vec<String>,
     pub webhook_url: Option<String>,
     pub webhook_secret_env: Option<String>,
     #[serde(default)]
@@ -58,6 +62,8 @@ pub struct PaymentLinkConfig {
     pub id: String,
     pub amount: Decimal,
     pub currency: String,
+    #[serde(default)]
+    pub public_allowed_origins: Vec<String>,
     #[serde(default)]
     pub metadata: serde_json::Value,
 }
@@ -102,6 +108,10 @@ impl Config {
         if self.pricing.stale_after_seconds == 0 {
             bail!("pricing.stale_after_seconds must be greater than zero");
         }
+        validate_public_allowed_origins(
+            "server.public_allowed_origins",
+            &self.server.public_allowed_origins,
+        )?;
 
         let mut ids = HashSet::new();
         for store in &self.stores {
@@ -117,6 +127,10 @@ impl Config {
             if store.webhook_url.is_some() && store.webhook_secret_env.is_none() {
                 bail!("store {} webhook_url requires webhook_secret_env", store.id);
             }
+            validate_public_allowed_origins(
+                &format!("store {} public_allowed_origins", store.id),
+                &store.public_allowed_origins,
+            )?;
             if store.onchain.is_none() && store.lightning.is_none() {
                 bail!("store {} has no payment methods", store.id);
             }
@@ -153,6 +167,13 @@ impl Config {
                         payment_link.id
                     );
                 }
+                validate_public_allowed_origins(
+                    &format!(
+                        "store {} payment link {} public_allowed_origins",
+                        store.id, payment_link.id
+                    ),
+                    &payment_link.public_allowed_origins,
+                )?;
             }
             if let Some(onchain) = &store.onchain {
                 onchain.network.parse::<bitcoin::Network>()?;
@@ -229,6 +250,7 @@ impl Default for ServerConfig {
         Self {
             listen: default_listen(),
             onchain_poll_seconds: default_onchain_poll_seconds(),
+            public_allowed_origins: Vec::new(),
         }
     }
 }
@@ -260,6 +282,33 @@ fn default_rate_ttl_seconds() -> u64 {
 
 fn default_network() -> String {
     "bitcoin".to_string()
+}
+
+fn validate_public_allowed_origins(scope: &str, origins: &[String]) -> anyhow::Result<()> {
+    for origin in origins {
+        let trimmed = origin.trim();
+        if trimmed.is_empty() {
+            bail!("{scope} cannot contain an empty origin");
+        }
+        if trimmed != origin {
+            bail!("{scope} origin {origin:?} cannot contain surrounding whitespace");
+        }
+        let Some(authority) = trimmed
+            .strip_prefix("https://")
+            .or_else(|| trimmed.strip_prefix("http://"))
+        else {
+            bail!("{scope} origin {origin:?} must start with http:// or https://");
+        };
+        let authority = authority.trim_end_matches('/');
+        if authority.is_empty()
+            || authority.contains('/')
+            || authority.contains('?')
+            || authority.contains('#')
+        {
+            bail!("{scope} origin {origin:?} must be a browser origin without a path");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -328,6 +377,32 @@ mod tests {
             id = "donate"
             amount = "20.00"
             currency = "USD"
+            "#,
+        )
+        .unwrap();
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_public_allowed_origin_paths() {
+        let config: Config = toml::from_str(
+            r#"
+            [server]
+            public_allowed_origins = ["https://example.com/pay"]
+
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
             "#,
         )
         .unwrap();

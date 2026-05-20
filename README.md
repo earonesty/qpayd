@@ -31,6 +31,7 @@ Create `qpayd.toml`:
 [server]
 listen = "0.0.0.0:8080"
 onchain_poll_seconds = 30
+public_allowed_origins = ["https://example.com"]
 
 [database]
 url = "sqlite:///data/qpayd.db"
@@ -62,6 +63,7 @@ api_password_env = "PHOENIXD_PASSWORD"
 id = "donate-10"
 amount = "10.00"
 currency = "USD"
+public_allowed_origins = ["https://example.com"]
 metadata = { kind = "donation", source = "static-site" }
 ```
 
@@ -273,8 +275,14 @@ only that configured amount, currency, and metadata.
 id = "donate-10"
 amount = "10.00"
 currency = "USD"
+public_allowed_origins = ["https://example.com"]
 metadata = { kind = "donation", site = "example.com" }
 ```
+
+If no `public_allowed_origins` are configured, public browser calls are allowed
+from any site. Set `public_allowed_origins` on `[server]`, `[[stores]]`, or a
+specific `[[stores.payment_links]]` to restrict browser calls by `Origin`.
+Server-side calls without an `Origin` header are still accepted.
 
 Create an invoice from browser code:
 
