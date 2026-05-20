@@ -56,6 +56,12 @@ electrum_servers = ["ssl://electrum.blockstream.info:50002"]
 backend = "phoenixd"
 url = "http://127.0.0.1:9740"
 api_password_env = "PHOENIXD_PASSWORD"
+
+[[stores.payment_links]]
+id = "donate-10"
+amount = "10.00"
+currency = "USD"
+metadata = { kind = "donation", source = "static-site" }
 ```
 
 With Phoenixd configured, qpayd creates BOLT11 invoices and polls Phoenixd for
@@ -246,6 +252,30 @@ Response:
 ```
 
 Open `checkout_url` to show the payment page.
+
+## Public Payment Links
+
+Public payment links let static sites create fresh invoices without exposing a
+store API token. Configure a named link under a store:
+
+```toml
+[[stores.payment_links]]
+id = "donate-10"
+amount = "10.00"
+currency = "USD"
+metadata = { kind = "donation", site = "example.com" }
+```
+
+Then add a button to any static site:
+
+```html
+<form method="post" action="https://pay.example.com/p/main/donate-10">
+  <button type="submit">Pay with Bitcoin</button>
+</form>
+```
+
+Submitting the form creates a new invoice and redirects to its checkout page.
+Opening the link in a browser shows a small hosted payment button page.
 
 ## Read An Invoice
 

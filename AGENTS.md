@@ -23,6 +23,8 @@ Treat this file as the local operating guide for future coding agents.
   Kraken as the default source unless the project changes direction.
 - Bitcoin plus Lightning both matter. Keep on-chain and Lightning behavior
   explicit and testable.
+- Public payment links are intended for static sites. They should create fresh
+  invoices without exposing store API tokens in browser code.
 
 ## Workflow
 

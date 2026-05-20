@@ -5,7 +5,7 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
-    response::{Html, IntoResponse, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use bitcoin::secp256k1::Secp256k1;
@@ -34,6 +34,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/healthz", get(healthz))
+        .route(
+            "/p/{store_id}/{payment_link_id}",
+            get(payment_link).post(create_payment_link_invoice),
+        )
         .route("/v1/stores/{store_id}/invoices", post(create_invoice))
         .route(
             "/v1/stores/{store_id}/invoices/{invoice_id}",
@@ -89,9 +93,104 @@ async fn create_invoice(
         .ok_or(ApiError::not_found("store not found"))?;
     authorize(store_cfg, &headers)?;
 
-    let currency = request.currency.to_uppercase();
+    let invoice = build_invoice(
+        &state,
+        store_cfg,
+        store_id,
+        request.amount,
+        request.currency,
+        request.metadata.unwrap_or_else(|| serde_json::json!({})),
+    )
+    .await?;
+
+    Ok(Json(InvoiceResponse::new(
+        invoice,
+        store_cfg.confirmations(),
+    )))
+}
+
+async fn create_payment_link_invoice(
+    State(state): State<AppState>,
+    Path((store_id, payment_link_id)): Path<(String, String)>,
+) -> Result<Redirect, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    let payment_link = store_cfg
+        .payment_link(&payment_link_id)
+        .ok_or(ApiError::not_found("payment link not found"))?;
+
+    let invoice = build_invoice(
+        &state,
+        store_cfg,
+        store_id,
+        payment_link.amount,
+        payment_link.currency.clone(),
+        payment_link.metadata.clone(),
+    )
+    .await?;
+
+    Ok(Redirect::to(&invoice.checkout_url))
+}
+
+async fn payment_link(
+    State(state): State<AppState>,
+    Path((store_id, payment_link_id)): Path<(String, String)>,
+) -> Result<Html<String>, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    let payment_link = store_cfg
+        .payment_link(&payment_link_id)
+        .ok_or(ApiError::not_found("payment link not found"))?;
+    let action = format!(
+        "/p/{}/{}",
+        escape_html(&store_id),
+        escape_html(&payment_link_id)
+    );
+
+    Ok(Html(format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pay {amount} {currency}</title>
+  <style>
+    :root {{ color-scheme: light dark; font-family: system-ui, sans-serif; }}
+    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; }}
+    main {{ width: min(32rem, calc(100vw - 2rem)); }}
+    button {{ font: inherit; padding: 0.75rem 1rem; cursor: pointer; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{amount} {currency}</h1>
+    <form method="post" action="{action}">
+      <button type="submit">Pay with Bitcoin</button>
+    </form>
+  </main>
+</body>
+</html>"#,
+        amount = payment_link.amount,
+        currency = escape_html(&payment_link.currency.to_uppercase()),
+        action = action,
+    )))
+}
+
+async fn build_invoice(
+    state: &AppState,
+    store_cfg: &crate::config::StoreConfig,
+    store_id: String,
+    amount: Decimal,
+    currency: String,
+    metadata: serde_json::Value,
+) -> anyhow::Result<Invoice> {
+    let currency = currency.to_uppercase();
     let rate = state.pricing.btc_rate(&currency).await?;
-    let btc_amount_sats = sats_for(request.amount, rate.value)?;
+    let btc_amount_sats = sats_for(amount, rate.value)?;
     let (onchain_address, onchain_address_index, onchain_script_pubkey) = match &store_cfg.onchain {
         Some(onchain) => {
             let index = state.store.reserve_address_index(&store_id).await?;
@@ -135,7 +234,7 @@ async fn create_invoice(
         id,
         store_id,
         status: InvoiceStatus::New,
-        amount: request.amount,
+        amount,
         currency,
         btc_amount_sats,
         onchain_address,
@@ -147,7 +246,7 @@ async fn create_invoice(
         lightning_payment_hash: lightning_invoice.and_then(|invoice| invoice.payment_hash),
         rate_source: rate.source,
         rate: rate.value,
-        metadata: request.metadata.unwrap_or_else(|| serde_json::json!({})),
+        metadata,
         checkout_url,
         expires_at: now + Duration::minutes(store_cfg.expiry_minutes() as i64),
         created_at: now,
@@ -160,10 +259,16 @@ async fn create_invoice(
         .insert_invoice(&invoice, &event, store_cfg.webhook_url.as_deref())
         .await?;
 
-    Ok(Json(InvoiceResponse::new(
-        invoice,
-        store_cfg.confirmations(),
-    )))
+    Ok(invoice)
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 async fn list_events(
@@ -450,13 +555,131 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use rust_decimal::Decimal;
+    use std::sync::Arc;
 
-    use super::sats_for;
+    use async_trait::async_trait;
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Method, Request, StatusCode},
+    };
+    use rust_decimal::Decimal;
+    use tower::ServiceExt;
+
+    use super::{AppState, router, sats_for};
+    use crate::{
+        config::Config,
+        pricing::{Rate, RateSource},
+        storage::{SqliteStore, Store},
+    };
 
     #[test]
     fn converts_fiat_to_sats() {
         let sats = sats_for(Decimal::from(25), Decimal::from(100_000)).unwrap();
         assert_eq!(sats, 25_000);
+    }
+
+    #[tokio::test]
+    async fn public_payment_link_redirects_to_checkout() {
+        let app = test_app().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/p/main/donate-10")
+                    .method(Method::POST)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(location.starts_with("https://pay.example.com/i/main/"));
+    }
+
+    #[tokio::test]
+    async fn public_payment_link_get_renders_payment_button_without_creating_invoice() {
+        let app = test_app().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/p/main/donate-10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("Pay with Bitcoin"));
+        assert!(body.contains("method=\"post\""));
+        assert!(body.contains("action=\"/p/main/donate-10\""));
+    }
+
+    async fn test_app() -> axum::Router {
+        let config = public_payment_link_config();
+        let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
+        store.migrate().await.unwrap();
+        router(AppState {
+            config: Arc::new(config),
+            store: Arc::new(store),
+            pricing: Arc::new(FixedRateSource),
+        })
+    }
+
+    fn public_payment_link_config() -> Config {
+        let config: Config = toml::from_str(
+            r#"
+            [server]
+            public_url = "https://pay.example.com"
+
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+
+            [[stores.payment_links]]
+            id = "donate-10"
+            amount = "10.00"
+            currency = "USD"
+            metadata = { source = "github-pages" }
+            "#,
+        )
+        .unwrap();
+        config.validate().unwrap();
+        config
+    }
+
+    struct FixedRateSource;
+
+    #[async_trait]
+    impl RateSource for FixedRateSource {
+        async fn btc_rate(&self, quote: &str) -> anyhow::Result<Rate> {
+            Ok(Rate {
+                source: "test".to_string(),
+                value: if quote == "USD" {
+                    Decimal::from(100_000)
+                } else {
+                    Decimal::ONE
+                },
+            })
+        }
     }
 }
