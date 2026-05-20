@@ -20,6 +20,8 @@ pub struct ServerConfig {
     pub listen: String,
     #[serde(default = "default_public_url")]
     pub public_url: String,
+    #[serde(default = "default_onchain_poll_seconds")]
+    pub onchain_poll_seconds: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -162,6 +164,7 @@ impl Default for ServerConfig {
         Self {
             listen: default_listen(),
             public_url: default_public_url(),
+            onchain_poll_seconds: default_onchain_poll_seconds(),
         }
     }
 }
@@ -181,6 +184,10 @@ fn default_listen() -> String {
 
 fn default_public_url() -> String {
     "http://127.0.0.1:8080".to_string()
+}
+
+fn default_onchain_poll_seconds() -> u64 {
+    30
 }
 
 fn default_kraken_url() -> String {

@@ -29,6 +29,7 @@ Create `qpayd.toml`:
 [server]
 listen = "0.0.0.0:8080"
 public_url = "https://pay.example.com"
+onchain_poll_seconds = 30
 
 [database]
 url = "sqlite:///data/qpayd.db"
@@ -74,6 +75,12 @@ Run:
 qpayd --config qpayd.toml serve
 ```
 
+Reconcile on-chain payments:
+
+```sh
+qpayd --config qpayd.toml sync-once
+```
+
 ## Create An Invoice
 
 ```sh
@@ -102,6 +109,7 @@ Response:
   "btc_amount_sats": 25000,
   "onchain_address": "bc1p...",
   "onchain_address_index": 0,
+  "onchain_script_pubkey": "5120...",
   "lightning_bolt11": "lnbc...",
   "lightning_payment_hash": "...",
   "rate_source": "kraken",

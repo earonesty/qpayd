@@ -13,6 +13,7 @@ pub struct Invoice {
     pub btc_amount_sats: u64,
     pub onchain_address: Option<String>,
     pub onchain_address_index: Option<u32>,
+    pub onchain_script_pubkey: Option<String>,
     pub lightning_bolt11: Option<String>,
     pub lightning_payment_hash: Option<String>,
     pub rate_source: String,

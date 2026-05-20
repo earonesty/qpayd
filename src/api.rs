@@ -60,7 +60,7 @@ async fn create_invoice(
     let currency = request.currency.to_uppercase();
     let rate = state.pricing.btc_rate(&currency).await?;
     let btc_amount_sats = sats_for(request.amount, rate.value)?;
-    let (onchain_address, onchain_address_index) = match &store_cfg.onchain {
+    let (onchain_address, onchain_address_index, onchain_script_pubkey) = match &store_cfg.onchain {
         Some(onchain) => {
             let index = state.store.reserve_address_index(&store_id).await?;
             let descriptor = onchain
@@ -75,17 +75,14 @@ async fn create_invoice(
                 .network
                 .parse::<bitcoin::Network>()
                 .context("invalid bitcoin network")?;
-            (
-                Some(
-                    derived
-                        .address(network)
-                        .context("descriptor does not produce an address")?
-                        .to_string(),
-                ),
-                Some(index),
-            )
+            let address = derived
+                .address(network)
+                .context("descriptor does not produce an address")?
+                .to_string();
+            let script_pubkey = hex::encode(derived.script_pubkey().as_bytes());
+            (Some(address), Some(index), Some(script_pubkey))
         }
-        None => (None, None),
+        None => (None, None, None),
     };
     let lightning_invoice = match &store_cfg.lightning {
         Some(lightning) => Some(
@@ -111,6 +108,7 @@ async fn create_invoice(
         btc_amount_sats,
         onchain_address,
         onchain_address_index,
+        onchain_script_pubkey,
         lightning_bolt11: lightning_invoice
             .as_ref()
             .map(|invoice| invoice.bolt11.clone()),
@@ -272,6 +270,7 @@ pub struct InvoiceResponse {
     pub btc_amount_sats: u64,
     pub onchain_address: Option<String>,
     pub onchain_address_index: Option<u32>,
+    pub onchain_script_pubkey: Option<String>,
     pub lightning_bolt11: Option<String>,
     pub lightning_payment_hash: Option<String>,
     pub min_confirmations: u32,
@@ -295,6 +294,7 @@ impl InvoiceResponse {
             btc_amount_sats: invoice.btc_amount_sats,
             onchain_address: invoice.onchain_address,
             onchain_address_index: invoice.onchain_address_index,
+            onchain_script_pubkey: invoice.onchain_script_pubkey,
             lightning_bolt11: invoice.lightning_bolt11,
             lightning_payment_hash: invoice.lightning_payment_hash,
             min_confirmations,
