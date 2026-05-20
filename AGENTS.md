@@ -87,15 +87,3 @@ cargo build --release --locked
 - Do not treat qpayd as a SaaS product unless explicitly asked. The public/private
   split is the operator's business; the software should stay open-source and
   generally useful.
-
-## Context From Earlier Work
-
-- The remote is `earonesty/qpayd`.
-- `pay.q32.com` / `pay-q32.fly.dev` have been used as deployment context, but
-  the daemon should not hard-code or center Fly.io.
-- A local ignored `fly/` folder may contain deployment experiments and its own
-  Git repo. Do not assume it belongs to this repository.
-- The intended first real integration is replacing Stripe for GetFlight later,
-  but do not edit that app until qpayd is capable enough for the integration.
-- GetFlight should eventually support `USE_QPAYD` and `USE_STRIPE`; launch intent
-  is qpayd-only, with both buttons rendered only if both flags are set.
