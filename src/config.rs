@@ -53,6 +53,7 @@ pub struct StoreConfig {
     pub min_confirmations: u32,
     pub onchain: Option<OnchainConfig>,
     pub lightning: Option<LightningConfig>,
+    pub lightning_sweep: Option<LightningSweepConfig>,
     #[serde(default)]
     pub payment_links: Vec<PaymentLinkConfig>,
 }
@@ -83,6 +84,22 @@ pub struct LightningConfig {
     pub backend: LightningBackend,
     pub url: String,
     pub api_password_env: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LightningSweepConfig {
+    pub backend: LightningBackend,
+    pub url: String,
+    pub full_api_password_env: String,
+    pub destination_descriptor: Option<String>,
+    pub destination_descriptor_env: Option<String>,
+    #[serde(default = "default_sweep_min_balance_sats")]
+    pub min_balance_sats: u64,
+    #[serde(default = "default_sweep_target_balance_sats")]
+    pub target_balance_sats: u64,
+    #[serde(default = "default_sweep_interval_seconds")]
+    pub interval_seconds: u64,
+    pub feerate_sat_byte: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -195,6 +212,58 @@ impl Config {
                     bail!("store {} phoenixd requires api_password_env", store.id);
                 }
             }
+            if let Some(sweep) = &store.lightning_sweep {
+                if store.lightning.is_none() {
+                    bail!(
+                        "store {} lightning_sweep requires lightning config",
+                        store.id
+                    );
+                }
+                if let Some(lightning) = &store.lightning
+                    && lightning.api_password_env.as_deref() == Some(&sweep.full_api_password_env)
+                {
+                    bail!(
+                        "store {} lightning_sweep full_api_password_env must be separate from lightning api_password_env",
+                        store.id
+                    );
+                }
+                if sweep.url.trim().is_empty() {
+                    bail!("store {} lightning_sweep url cannot be empty", store.id);
+                }
+                if sweep.full_api_password_env.trim().is_empty() {
+                    bail!(
+                        "store {} lightning_sweep full_api_password_env cannot be empty",
+                        store.id
+                    );
+                }
+                if sweep.min_balance_sats == 0 {
+                    bail!(
+                        "store {} lightning_sweep min_balance_sats must be greater than zero",
+                        store.id
+                    );
+                }
+                if sweep.target_balance_sats >= sweep.min_balance_sats {
+                    bail!(
+                        "store {} lightning_sweep target_balance_sats must be less than min_balance_sats",
+                        store.id
+                    );
+                }
+                if sweep.interval_seconds == 0 {
+                    bail!(
+                        "store {} lightning_sweep interval_seconds must be greater than zero",
+                        store.id
+                    );
+                }
+                sweep
+                    .destination_descriptor()?
+                    .parse::<miniscript::Descriptor<miniscript::DescriptorPublicKey>>()
+                    .with_context(|| {
+                        format!(
+                            "invalid lightning_sweep destination descriptor for store {}",
+                            store.id
+                        )
+                    })?;
+            }
         }
 
         Ok(())
@@ -202,6 +271,26 @@ impl Config {
 
     pub fn store(&self, id: &str) -> Option<&StoreConfig> {
         self.stores.iter().find(|store| store.id == id)
+    }
+}
+
+impl LightningSweepConfig {
+    pub fn destination_descriptor(&self) -> anyhow::Result<String> {
+        match (
+            &self.destination_descriptor,
+            &self.destination_descriptor_env,
+        ) {
+            (Some(_), Some(_)) => {
+                bail!("use destination_descriptor or destination_descriptor_env, not both")
+            }
+            (Some(descriptor), None) => Ok(descriptor.clone()),
+            (None, Some(env)) => {
+                std::env::var(env).with_context(|| format!("missing env var {}", env))
+            }
+            (None, None) => bail!(
+                "lightning_sweep requires destination_descriptor or destination_descriptor_env"
+            ),
+        }
     }
 }
 
@@ -282,6 +371,18 @@ fn default_rate_ttl_seconds() -> u64 {
 
 fn default_network() -> String {
     "bitcoin".to_string()
+}
+
+fn default_sweep_min_balance_sats() -> u64 {
+    100_000
+}
+
+fn default_sweep_target_balance_sats() -> u64 {
+    25_000
+}
+
+fn default_sweep_interval_seconds() -> u64 {
+    3600
 }
 
 fn validate_public_allowed_origins(scope: &str, origins: &[String]) -> anyhow::Result<()> {
@@ -403,6 +504,40 @@ mod tests {
             network = "bitcoin"
             descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
             electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+            "#,
+        )
+        .unwrap();
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_shared_lightning_invoice_and_sweep_secret_env() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+
+            [stores.lightning]
+            backend = "phoenixd"
+            url = "http://127.0.0.1:9740"
+            api_password_env = "PHOENIXD_PASSWORD"
+
+            [stores.lightning_sweep]
+            backend = "phoenixd"
+            url = "http://127.0.0.1:9740"
+            full_api_password_env = "PHOENIXD_PASSWORD"
+            destination_descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
             "#,
         )
         .unwrap();

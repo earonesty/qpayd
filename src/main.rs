@@ -12,7 +12,9 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::Context;
 use axum::Router;
+use bitcoin::secp256k1::Secp256k1;
 use clap::{Parser, Subcommand};
+use miniscript::{Descriptor, DescriptorPublicKey};
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -40,6 +42,7 @@ enum Command {
     Migrate,
     Check,
     SyncOnce,
+    SweepOnce,
 }
 
 #[tokio::main]
@@ -74,6 +77,11 @@ async fn main() -> anyhow::Result<()> {
             let store = connect_store(&config.database.url).await?;
             sync_once(config, store).await
         }
+        Command::SweepOnce => {
+            config.validate()?;
+            let mut last_runs = std::collections::HashMap::new();
+            lightning_sweep_once(&config, &mut last_runs).await
+        }
     }
 }
 
@@ -91,6 +99,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         pricing: Arc::new(KrakenRateSource::new(config.pricing.clone())),
     };
     tokio::spawn(sync_loop(config.clone(), state.store.clone()));
+    tokio::spawn(lightning_sweep_loop(config.clone()));
     tokio::spawn(webhook_loop(config.clone(), state.store.clone()));
 
     let app: Router = api::router(state).layer(TraceLayer::new_for_http());
@@ -162,6 +171,83 @@ async fn sync_once(config: Config, store: Arc<dyn Store>) -> anyhow::Result<()> 
         }
     }
     Ok(())
+}
+
+async fn lightning_sweep_loop(config: Config) {
+    let tick_seconds = config
+        .stores
+        .iter()
+        .filter_map(|store| store.lightning_sweep.as_ref())
+        .map(|sweep| sweep.interval_seconds)
+        .min();
+    let Some(tick_seconds) = tick_seconds else {
+        return;
+    };
+
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(tick_seconds));
+    let mut last_runs = std::collections::HashMap::new();
+    loop {
+        interval.tick().await;
+        if let Err(error) = lightning_sweep_once(&config, &mut last_runs).await {
+            tracing::warn!(%error, "lightning sweep failed");
+        }
+    }
+}
+
+async fn lightning_sweep_once(
+    config: &Config,
+    last_runs: &mut std::collections::HashMap<String, std::time::Instant>,
+) -> anyhow::Result<()> {
+    for store_config in &config.stores {
+        let Some(sweep_config) = &store_config.lightning_sweep else {
+            continue;
+        };
+        let now = std::time::Instant::now();
+        if let Some(last_run) = last_runs.get(&store_config.id)
+            && now.duration_since(*last_run).as_secs() < sweep_config.interval_seconds
+        {
+            continue;
+        }
+        last_runs.insert(store_config.id.clone(), now);
+        let network = store_config
+            .onchain
+            .as_ref()
+            .map(|onchain| onchain.network.as_str())
+            .unwrap_or("bitcoin")
+            .parse::<bitcoin::Network>()
+            .with_context(|| format!("invalid bitcoin network for store {}", store_config.id))?;
+        let destination = derive_lightning_sweep_address(sweep_config, network)?;
+        match lightning::sweep_to_address(sweep_config, destination).await? {
+            Some(result) => tracing::info!(
+                store_id = %store_config.id,
+                balance_sats = result.balance_sats,
+                amount_sats = result.amount_sats,
+                address = %result.address,
+                tx_id = result.tx_id.as_deref().unwrap_or(""),
+                "lightning balance swept"
+            ),
+            None => tracing::debug!(store_id = %store_config.id, "lightning sweep skipped"),
+        }
+    }
+    Ok(())
+}
+
+fn derive_lightning_sweep_address(
+    config: &crate::config::LightningSweepConfig,
+    network: bitcoin::Network,
+) -> anyhow::Result<String> {
+    let descriptor = config
+        .destination_descriptor()?
+        .parse::<Descriptor<DescriptorPublicKey>>()
+        .context("invalid lightning sweep destination descriptor")?;
+    let secp = Secp256k1::verification_only();
+    let derived = descriptor
+        .derived_descriptor(&secp, 0)
+        .context("failed to derive lightning sweep destination descriptor")?;
+    let address = derived
+        .address(network)
+        .context("lightning sweep destination descriptor does not produce an address")?;
+    Ok(address.to_string())
 }
 
 async fn update_invoice_status_event(
