@@ -1,5 +1,6 @@
 mod api;
 mod config;
+mod events;
 mod invoice;
 mod lightning;
 mod onchain;
@@ -88,6 +89,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         pricing: Arc::new(KrakenRateSource::new(config.pricing.clone())),
     };
     tokio::spawn(sync_loop(config.clone(), state.store.clone()));
+    tokio::spawn(webhook_loop(config.clone(), state.store.clone()));
 
     let app: Router = api::router(state).layer(TraceLayer::new_for_http());
     let addr: SocketAddr = config
@@ -116,46 +118,115 @@ async fn sync_loop(config: Config, store: Arc<dyn Store>) {
 
 async fn sync_once(config: Config, store: Arc<dyn Store>) -> anyhow::Result<()> {
     for store_config in &config.stores {
-        let Some(onchain_config) = &store_config.onchain else {
-            continue;
-        };
-        let Some(server) = onchain_config.electrum_servers.first() else {
-            continue;
-        };
-        let invoices = store.active_onchain_invoices(&store_config.id).await?;
-        for invoice in invoices {
-            let observation = onchain::observe(server.clone(), invoice.clone()).await?;
-            if observation.next_status != invoice.status {
-                let new_status = observation.next_status;
-                store
-                    .update_invoice_status(
-                        &invoice.store_id,
-                        invoice.id,
-                        new_status,
-                        chrono::Utc::now(),
-                    )
-                    .await?;
-                if let (Some(url), Some(secret_env)) =
-                    (&store_config.webhook_url, &store_config.webhook_secret_env)
-                {
-                    let mut event_invoice = invoice.clone();
-                    event_invoice.status = new_status;
-                    let secret = std::env::var(secret_env)?;
-                    let event = webhook::Event {
-                        id: format!("evt_{}", uuid::Uuid::new_v4()),
-                        event_type: format!("invoice.{}", new_status.as_str()),
-                        data: event_invoice,
-                        created_at: chrono::Utc::now(),
-                    };
-                    webhook::deliver(url, &secret, &event).await?;
-                }
-                tracing::info!(
-                    invoice_id = %invoice.id,
-                    status = new_status.as_str(),
-                    "invoice status updated"
-                );
+        if let Some(onchain_config) = &store_config.onchain
+            && let Some(server) = onchain_config.electrum_servers.first()
+        {
+            let invoices = store.active_onchain_invoices(&store_config.id).await?;
+            for invoice in invoices {
+                let observation = onchain::observe(server.clone(), invoice.clone()).await?;
+                update_invoice_status_event(
+                    store.clone(),
+                    store_config.webhook_url.as_deref(),
+                    invoice,
+                    observation.next_status,
+                )
+                .await?;
+            }
+        }
+
+        if let Some(lightning_config) = &store_config.lightning {
+            let invoices = store.active_lightning_invoices(&store_config.id).await?;
+            for invoice in invoices {
+                let next_status = lightning::observe(lightning_config, &invoice).await?;
+                update_invoice_status_event(
+                    store.clone(),
+                    store_config.webhook_url.as_deref(),
+                    invoice,
+                    next_status,
+                )
+                .await?;
             }
         }
     }
     Ok(())
+}
+
+async fn update_invoice_status_event(
+    store: Arc<dyn Store>,
+    webhook_url: Option<&str>,
+    invoice: invoice::Invoice,
+    new_status: invoice::InvoiceStatus,
+) -> anyhow::Result<()> {
+    if new_status == invoice.status {
+        return Ok(());
+    }
+    let updated_at = chrono::Utc::now();
+    let event = events::invoice_status_event(&invoice, new_status, updated_at);
+    store
+        .update_invoice_status(
+            &invoice.store_id,
+            invoice.id,
+            new_status,
+            updated_at,
+            &event,
+            webhook_url,
+        )
+        .await?;
+    tracing::info!(
+        invoice_id = %invoice.id,
+        status = new_status.as_str(),
+        "invoice status updated"
+    );
+    Ok(())
+}
+
+async fn webhook_loop(config: Config, store: Arc<dyn Store>) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+    loop {
+        interval.tick().await;
+        if let Err(error) = deliver_due_webhooks(&config, store.clone()).await {
+            tracing::warn!(%error, "webhook delivery failed");
+        }
+    }
+}
+
+async fn deliver_due_webhooks(config: &Config, store: Arc<dyn Store>) -> anyhow::Result<()> {
+    let deliveries = store.due_webhook_deliveries(25, chrono::Utc::now()).await?;
+    for delivery in deliveries {
+        let Some(store_config) = config.store(&delivery.event.store_id) else {
+            continue;
+        };
+        let Some(secret_env) = &store_config.webhook_secret_env else {
+            continue;
+        };
+        let secret = std::env::var(secret_env)?;
+        let body = serde_json::to_vec(&delivery.event)?;
+        match webhook::deliver(&delivery.url, &secret, &body).await {
+            Ok(()) => {
+                store
+                    .mark_webhook_delivered(delivery.id, chrono::Utc::now())
+                    .await?;
+            }
+            Err(error) => {
+                let attempts = delivery.attempts + 1;
+                let delay_seconds = retry_delay_seconds(attempts);
+                let now = chrono::Utc::now();
+                store
+                    .mark_webhook_failed(
+                        delivery.id,
+                        attempts,
+                        now + chrono::Duration::seconds(delay_seconds),
+                        &error.to_string(),
+                        now,
+                    )
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn retry_delay_seconds(attempts: u32) -> i64 {
+    let exponent = attempts.saturating_sub(1).min(8);
+    30 * 2_i64.pow(exponent)
 }

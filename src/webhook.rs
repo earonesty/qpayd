@@ -1,17 +1,7 @@
 use hmac::{Hmac, KeyInit, Mac};
-use serde::Serialize;
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
-
-#[derive(Debug, Serialize)]
-pub struct Event<T> {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub event_type: String,
-    pub data: T,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
 
 pub fn sign(secret: &str, timestamp: i64, body: &[u8]) -> String {
     let payload = payload(timestamp, body);
@@ -31,20 +21,15 @@ fn payload(timestamp: i64, body: &[u8]) -> Vec<u8> {
     payload
 }
 
-pub async fn deliver<T: Serialize>(
-    url: &str,
-    secret: &str,
-    event: &Event<T>,
-) -> anyhow::Result<()> {
-    let body = serde_json::to_vec(event)?;
+pub async fn deliver(url: &str, secret: &str, body: &[u8]) -> anyhow::Result<()> {
     let timestamp = chrono::Utc::now().timestamp();
-    let signature = sign(secret, timestamp, &body);
+    let signature = sign(secret, timestamp, body);
 
     reqwest::Client::new()
         .post(url)
         .header("content-type", "application/json")
         .header("qpayd-signature", signature)
-        .body(body)
+        .body(body.to_vec())
         .send()
         .await?
         .error_for_status()?;

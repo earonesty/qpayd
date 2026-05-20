@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::{
     config::Config,
+    events,
     invoice::{Invoice, InvoiceStatus},
     pricing::RateSource,
     storage::Store,
@@ -37,6 +38,12 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/stores/{store_id}/invoices/{invoice_id}",
             get(get_invoice),
+        )
+        .route("/v1/stores/{store_id}/events", get(list_events))
+        .route("/v1/stores/{store_id}/events/{event_id}", get(get_event))
+        .route(
+            "/v1/stores/{store_id}/events/{event_id}/replay",
+            post(replay_event),
         )
         .route("/i/{store_id}/{invoice_id}", get(checkout))
         .with_state(state)
@@ -147,24 +154,81 @@ async fn create_invoice(
         updated_at: now,
     };
 
-    state.store.insert_invoice(&invoice).await?;
-
-    if let (Some(url), Some(secret_env)) = (&store_cfg.webhook_url, &store_cfg.webhook_secret_env) {
-        let secret =
-            std::env::var(secret_env).with_context(|| format!("missing env var {secret_env}"))?;
-        let event = crate::webhook::Event {
-            id: format!("evt_{}", Uuid::new_v4()),
-            event_type: "invoice.created".to_string(),
-            data: InvoiceResponse::new(invoice.clone(), store_cfg.confirmations()),
-            created_at: Utc::now(),
-        };
-        crate::webhook::deliver(url, &secret, &event).await?;
-    }
+    let event = events::invoice_created_event(&invoice, now);
+    state
+        .store
+        .insert_invoice(&invoice, &event, store_cfg.webhook_url.as_deref())
+        .await?;
 
     Ok(Json(InvoiceResponse::new(
         invoice,
         store_cfg.confirmations(),
     )))
+}
+
+async fn list_events(
+    State(state): State<AppState>,
+    Path(store_id): Path<String>,
+    Query(query): Query<ListEventsQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<events::EventEnvelope>>, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    authorize(store_cfg, &headers)?;
+
+    Ok(Json(
+        state
+            .store
+            .events(&store_id, query.limit.unwrap_or(50))
+            .await?,
+    ))
+}
+
+async fn get_event(
+    State(state): State<AppState>,
+    Path((store_id, event_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<events::EventEnvelope>, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    authorize(store_cfg, &headers)?;
+
+    let event = state
+        .store
+        .event(&store_id, &event_id)
+        .await?
+        .ok_or(ApiError::not_found("event not found"))?;
+    Ok(Json(event))
+}
+
+async fn replay_event(
+    State(state): State<AppState>,
+    Path((store_id, event_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    authorize(store_cfg, &headers)?;
+    let url = store_cfg
+        .webhook_url
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("store has no webhook_url"))?;
+    state
+        .store
+        .event(&store_id, &event_id)
+        .await?
+        .ok_or(ApiError::not_found("event not found"))?;
+    state
+        .store
+        .enqueue_webhook_delivery(&event_id, &store_id, url, Utc::now())
+        .await?;
+    Ok(StatusCode::ACCEPTED)
 }
 
 async fn get_invoice(
@@ -285,6 +349,11 @@ pub struct CreateInvoiceRequest {
     pub metadata: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ListEventsQuery {
+    limit: Option<u32>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct InvoiceResponse {
     pub id: Uuid,
@@ -352,6 +421,13 @@ impl ApiError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             message: "unauthorized".to_string(),
+        }
+    }
+
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
         }
     }
 }

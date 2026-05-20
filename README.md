@@ -42,6 +42,8 @@ stale_after_seconds = 60
 id = "main"
 name = "Main Store"
 api_token_env = "QPAYD_MAIN_API_TOKEN"
+webhook_url = "https://example.com/webhooks/qpayd"
+webhook_secret_env = "QPAYD_MAIN_WEBHOOK_SECRET"
 invoice_expiry_minutes = 15
 min_confirmations = 1
 
@@ -56,10 +58,14 @@ url = "http://127.0.0.1:9740"
 api_password_env = "PHOENIXD_PASSWORD"
 ```
 
+With Phoenixd configured, qpayd creates BOLT11 invoices and polls Phoenixd for
+incoming payment status during reconciliation.
+
 Then set the token:
 
 ```sh
 export QPAYD_MAIN_API_TOKEN="$(openssl rand -hex 32)"
+export QPAYD_MAIN_WEBHOOK_SECRET="$(openssl rand -hex 32)"
 export QPAYD_MAIN_DESCRIPTOR="wpkh([00000000/84h/0h/0h]xpub.../0/*)"
 ```
 
@@ -224,7 +230,31 @@ curl -sS https://pay.example.com/v1/stores/main/invoices/$INVOICE_ID \
   -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN"
 ```
 
-## Webhook Signatures
+## Payment Statuses
+
+Fulfill orders when an invoice reaches `settled`.
+
+Use `payment_detected` as a pending on-chain state: qpayd has seen enough
+unconfirmed sats, but the payment is not confirmed yet. Use `partially_paid`
+for customer support or retry flows. Use `expired` to release inventory. Use
+`paid_late` for manual handling after the invoice window has closed.
+
+## Webhooks
+
+When `webhook_url` is configured, qpayd records each event in SQLite and
+delivers it from a retry queue. The checkout request does not depend on the
+receiver being online.
+
+Events currently emitted:
+
+```text
+invoice.created
+invoice.payment_detected
+invoice.partially_paid
+invoice.settled
+invoice.expired
+invoice.paid_late
+```
 
 Webhook requests are signed with:
 
@@ -239,6 +269,22 @@ The signature payload is:
 ```
 
 Verify the `v1` value with the store webhook secret.
+
+### List Events
+
+```sh
+curl -sS "https://pay.example.com/v1/stores/main/events?limit=50" \
+  -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN"
+```
+
+### Replay An Event
+
+```sh
+curl -sS -X POST https://pay.example.com/v1/stores/main/events/$EVENT_ID/replay \
+  -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN"
+```
+
+Replay queues a fresh webhook delivery for the stored event.
 
 ## Commands
 

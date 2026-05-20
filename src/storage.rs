@@ -9,20 +9,58 @@ use sqlx::{
 };
 use uuid::Uuid;
 
-use crate::invoice::{Invoice, InvoiceStatus};
+use crate::{
+    events::{EventEnvelope, QueuedWebhookDelivery},
+    invoice::{Invoice, InvoiceStatus},
+};
 
 #[async_trait]
 pub trait Store: Send + Sync {
     async fn migrate(&self) -> anyhow::Result<()>;
     async fn reserve_address_index(&self, store_id: &str) -> anyhow::Result<u32>;
-    async fn insert_invoice(&self, invoice: &Invoice) -> anyhow::Result<()>;
+    async fn insert_invoice(
+        &self,
+        invoice: &Invoice,
+        event: &EventEnvelope,
+        webhook_url: Option<&str>,
+    ) -> anyhow::Result<()>;
     async fn invoice(&self, store_id: &str, id: Uuid) -> anyhow::Result<Option<Invoice>>;
     async fn active_onchain_invoices(&self, store_id: &str) -> anyhow::Result<Vec<Invoice>>;
+    async fn active_lightning_invoices(&self, store_id: &str) -> anyhow::Result<Vec<Invoice>>;
     async fn update_invoice_status(
         &self,
         store_id: &str,
         id: Uuid,
         status: InvoiceStatus,
+        updated_at: DateTime<Utc>,
+        event: &EventEnvelope,
+        webhook_url: Option<&str>,
+    ) -> anyhow::Result<()>;
+    async fn events(&self, store_id: &str, limit: u32) -> anyhow::Result<Vec<EventEnvelope>>;
+    async fn event(&self, store_id: &str, event_id: &str) -> anyhow::Result<Option<EventEnvelope>>;
+    async fn enqueue_webhook_delivery(
+        &self,
+        event_id: &str,
+        store_id: &str,
+        url: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()>;
+    async fn due_webhook_deliveries(
+        &self,
+        limit: u32,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<QueuedWebhookDelivery>>;
+    async fn mark_webhook_delivered(
+        &self,
+        id: i64,
+        delivered_at: DateTime<Utc>,
+    ) -> anyhow::Result<()>;
+    async fn mark_webhook_failed(
+        &self,
+        id: i64,
+        attempts: u32,
+        next_attempt_at: DateTime<Utc>,
+        error: &str,
         updated_at: DateTime<Utc>,
     ) -> anyhow::Result<()>;
 }
@@ -93,6 +131,60 @@ impl Store for SqliteStore {
         .execute(&self.pool)
         .await?;
 
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS events (
+                id TEXT PRIMARY KEY NOT NULL,
+                store_id TEXT NOT NULL,
+                invoice_id TEXT,
+                type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS events_store_created_idx
+            ON events (store_id, created_at)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS webhook_deliveries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL,
+                store_id TEXT NOT NULL,
+                url TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempts INTEGER NOT NULL,
+                next_attempt_at TEXT NOT NULL,
+                last_error TEXT,
+                delivered_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(event_id) REFERENCES events(id)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS webhook_deliveries_due_idx
+            ON webhook_deliveries (status, next_attempt_at)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -136,7 +228,13 @@ impl Store for SqliteStore {
         Ok(index as u32)
     }
 
-    async fn insert_invoice(&self, invoice: &Invoice) -> anyhow::Result<()> {
+    async fn insert_invoice(
+        &self,
+        invoice: &Invoice,
+        event: &EventEnvelope,
+        webhook_url: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
             INSERT INTO invoices (
@@ -165,8 +263,16 @@ impl Store for SqliteStore {
         .bind(invoice.expires_at.to_rfc3339())
         .bind(invoice.created_at.to_rfc3339())
         .bind(invoice.updated_at.to_rfc3339())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+
+        insert_event_query(event).execute(&mut *tx).await?;
+        if let Some(url) = webhook_url {
+            enqueue_webhook_query(&event.id, &event.store_id, url, event.created_at)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
 
         Ok(())
     }
@@ -203,7 +309,27 @@ impl Store for SqliteStore {
             FROM invoices
             WHERE store_id = ?
               AND onchain_script_pubkey IS NOT NULL
-              AND status IN ('new', 'payment_detected', 'partially_paid')
+              AND status IN ('new', 'payment_detected', 'partially_paid', 'expired')
+            "#,
+        )
+        .bind(store_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(invoice_from_row).collect()
+    }
+
+    async fn active_lightning_invoices(&self, store_id: &str) -> anyhow::Result<Vec<Invoice>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                   onchain_address, onchain_address_index, onchain_script_pubkey,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata, checkout_url,
+                   expires_at, created_at, updated_at
+            FROM invoices
+            WHERE store_id = ?
+              AND lightning_payment_hash IS NOT NULL
+              AND status IN ('new', 'payment_detected', 'partially_paid', 'expired')
             "#,
         )
         .bind(store_id)
@@ -219,7 +345,10 @@ impl Store for SqliteStore {
         id: Uuid,
         status: InvoiceStatus,
         updated_at: DateTime<Utc>,
+        event: &EventEnvelope,
+        webhook_url: Option<&str>,
     ) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
             UPDATE invoices
@@ -231,11 +360,188 @@ impl Store for SqliteStore {
         .bind(updated_at.to_rfc3339())
         .bind(store_id)
         .bind(id.to_string())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+
+        let inserted = insert_event_query(event)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            > 0;
+        if inserted && let Some(url) = webhook_url {
+            enqueue_webhook_query(&event.id, &event.store_id, url, event.created_at)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
 
         Ok(())
     }
+
+    async fn events(&self, store_id: &str, limit: u32) -> anyhow::Result<Vec<EventEnvelope>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, store_id, invoice_id, type, payload_json, created_at
+            FROM events
+            WHERE store_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(store_id)
+        .bind(i64::from(limit.min(200)))
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(event_from_row).collect()
+    }
+
+    async fn event(&self, store_id: &str, event_id: &str) -> anyhow::Result<Option<EventEnvelope>> {
+        let Some(row) = sqlx::query(
+            r#"
+            SELECT id, store_id, invoice_id, type, payload_json, created_at
+            FROM events
+            WHERE store_id = ? AND id = ?
+            "#,
+        )
+        .bind(store_id)
+        .bind(event_id)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(event_from_row(row)?))
+    }
+
+    async fn enqueue_webhook_delivery(
+        &self,
+        event_id: &str,
+        store_id: &str,
+        url: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        enqueue_webhook_query(event_id, store_id, url, now)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn due_webhook_deliveries(
+        &self,
+        limit: u32,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<QueuedWebhookDelivery>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                wd.id AS delivery_id,
+                wd.url AS delivery_url,
+                wd.attempts AS delivery_attempts,
+                e.id, e.store_id, e.invoice_id, e.type, e.payload_json, e.created_at
+            FROM webhook_deliveries wd
+            JOIN events e ON e.id = wd.event_id
+            WHERE wd.status = 'pending' AND wd.next_attempt_at <= ?
+            ORDER BY wd.next_attempt_at ASC, wd.id ASC
+            LIMIT ?
+            "#,
+        )
+        .bind(now.to_rfc3339())
+        .bind(i64::from(limit.min(100)))
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(webhook_delivery_from_row).collect()
+    }
+
+    async fn mark_webhook_delivered(
+        &self,
+        id: i64,
+        delivered_at: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE webhook_deliveries
+            SET status = 'delivered',
+                delivered_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(delivered_at.to_rfc3339())
+        .bind(delivered_at.to_rfc3339())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn mark_webhook_failed(
+        &self,
+        id: i64,
+        attempts: u32,
+        next_attempt_at: DateTime<Utc>,
+        error: &str,
+        updated_at: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE webhook_deliveries
+            SET attempts = ?,
+                next_attempt_at = ?,
+                last_error = ?,
+                updated_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(i64::from(attempts))
+        .bind(next_attempt_at.to_rfc3339())
+        .bind(error)
+        .bind(updated_at.to_rfc3339())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+fn insert_event_query(
+    event: &EventEnvelope,
+) -> sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> {
+    sqlx::query(
+        r#"
+        INSERT OR IGNORE INTO events (id, store_id, invoice_id, type, payload_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&event.id)
+    .bind(&event.store_id)
+    .bind(event.invoice_id.map(|id| id.to_string()))
+    .bind(&event.event_type)
+    .bind(serde_json::to_string(event).expect("event serializes"))
+    .bind(event.created_at.to_rfc3339())
+}
+
+fn enqueue_webhook_query<'a>(
+    event_id: &'a str,
+    store_id: &'a str,
+    url: &'a str,
+    now: DateTime<Utc>,
+) -> sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>> {
+    sqlx::query(
+        r#"
+        INSERT INTO webhook_deliveries (
+            event_id, store_id, url, status, attempts, next_attempt_at, created_at, updated_at
+        ) VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)
+        "#,
+    )
+    .bind(event_id)
+    .bind(store_id)
+    .bind(url)
+    .bind(now.to_rfc3339())
+    .bind(now.to_rfc3339())
+    .bind(now.to_rfc3339())
 }
 
 fn invoice_from_row(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<Invoice> {
@@ -264,4 +570,156 @@ fn invoice_from_row(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<Invoice> {
         updated_at: DateTime::parse_from_rfc3339(row.get::<String, _>("updated_at").as_str())?
             .with_timezone(&Utc),
     })
+}
+
+fn event_from_row(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<EventEnvelope> {
+    event_from_row_ref(&row)
+}
+
+fn event_from_row_ref(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<EventEnvelope> {
+    serde_json::from_str(row.get::<String, _>("payload_json").as_str()).map_err(anyhow::Error::from)
+}
+
+fn webhook_delivery_from_row(
+    row: sqlx::sqlite::SqliteRow,
+) -> anyhow::Result<QueuedWebhookDelivery> {
+    Ok(QueuedWebhookDelivery {
+        id: row.get("delivery_id"),
+        event: event_from_row_ref(&row)?,
+        url: row.get("delivery_url"),
+        attempts: row.get::<i64, _>("delivery_attempts") as u32,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, Utc};
+    use rust_decimal::Decimal;
+    use uuid::Uuid;
+
+    use super::{SqliteStore, Store};
+    use crate::{
+        events::{invoice_created_event, invoice_status_event},
+        invoice::{Invoice, InvoiceStatus},
+    };
+
+    #[tokio::test]
+    async fn insert_invoice_persists_event_and_webhook_delivery() {
+        let store = test_store().await;
+        let invoice = test_invoice(InvoiceStatus::New);
+        let event = invoice_created_event(&invoice, invoice.created_at);
+
+        store
+            .insert_invoice(&invoice, &event, Some("https://example.com/webhook"))
+            .await
+            .unwrap();
+
+        let events = store.events(&invoice.store_id, 10).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, event.id);
+
+        let due = store.due_webhook_deliveries(10, Utc::now()).await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].event.id, event.id);
+        assert_eq!(due[0].url, "https://example.com/webhook");
+    }
+
+    #[tokio::test]
+    async fn replay_adds_a_fresh_delivery_for_existing_event() {
+        let store = test_store().await;
+        let invoice = test_invoice(InvoiceStatus::New);
+        let event = invoice_created_event(&invoice, invoice.created_at);
+
+        store
+            .insert_invoice(&invoice, &event, Some("https://example.com/webhook"))
+            .await
+            .unwrap();
+        store
+            .enqueue_webhook_delivery(
+                &event.id,
+                &invoice.store_id,
+                "https://example.com/webhook",
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+
+        let due = store.due_webhook_deliveries(10, Utc::now()).await.unwrap();
+        assert_eq!(due.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn duplicate_status_event_does_not_enqueue_twice() {
+        let store = test_store().await;
+        let invoice = test_invoice(InvoiceStatus::New);
+        let created = invoice_created_event(&invoice, invoice.created_at);
+        store
+            .insert_invoice(&invoice, &created, Some("https://example.com/webhook"))
+            .await
+            .unwrap();
+
+        let updated_at = Utc::now();
+        let settled = invoice_status_event(&invoice, InvoiceStatus::Settled, updated_at);
+        store
+            .update_invoice_status(
+                &invoice.store_id,
+                invoice.id,
+                InvoiceStatus::Settled,
+                updated_at,
+                &settled,
+                Some("https://example.com/webhook"),
+            )
+            .await
+            .unwrap();
+        store
+            .update_invoice_status(
+                &invoice.store_id,
+                invoice.id,
+                InvoiceStatus::Settled,
+                updated_at,
+                &settled,
+                Some("https://example.com/webhook"),
+            )
+            .await
+            .unwrap();
+
+        let events = store.events(&invoice.store_id, 10).await.unwrap();
+        assert_eq!(events.len(), 2);
+
+        let due = store.due_webhook_deliveries(10, Utc::now()).await.unwrap();
+        assert_eq!(due.len(), 2);
+    }
+
+    async fn test_store() -> SqliteStore {
+        let path = std::env::temp_dir().join(format!("qpayd-test-{}.db", Uuid::new_v4()));
+        let store = SqliteStore::connect(&format!("sqlite://{}", path.display()))
+            .await
+            .unwrap();
+        store.migrate().await.unwrap();
+        store
+    }
+
+    fn test_invoice(status: InvoiceStatus) -> Invoice {
+        let now = Utc::now();
+        Invoice {
+            id: Uuid::new_v4(),
+            store_id: "main".to_string(),
+            status,
+            amount: Decimal::from(10),
+            currency: "USD".to_string(),
+            btc_amount_sats: 10_000,
+            onchain_address: Some("bc1qexample".to_string()),
+            onchain_address_index: Some(0),
+            onchain_script_pubkey: Some("0014".to_string()),
+            lightning_bolt11: None,
+            lightning_payment_hash: None,
+            rate_source: "kraken".to_string(),
+            rate: Decimal::from(100_000),
+            metadata: serde_json::json!({ "order_id": "ord_123" }),
+            checkout_url: "https://pay.example.com/i/main/test".to_string(),
+            expires_at: now + Duration::minutes(15),
+            created_at: now,
+            updated_at: now,
+        }
+    }
 }
