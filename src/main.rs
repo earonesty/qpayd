@@ -39,6 +39,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Serve,
+    Sweep,
     Migrate,
     Check,
     SyncOnce,
@@ -60,6 +61,11 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Serve => serve(config).await,
+        Command::Sweep => {
+            config.validate()?;
+            lightning_sweep_loop(config).await;
+            Ok(())
+        }
         Command::Migrate => {
             config.validate()?;
             let store = connect_store(&config.database.url).await?;
@@ -99,7 +105,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         pricing: Arc::new(KrakenRateSource::new(config.pricing.clone())),
     };
     tokio::spawn(sync_loop(config.clone(), state.store.clone()));
-    tokio::spawn(lightning_sweep_loop(config.clone()));
     tokio::spawn(webhook_loop(config.clone(), state.store.clone()));
 
     let app: Router = api::router(state).layer(TraceLayer::new_for_http());
