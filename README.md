@@ -150,6 +150,15 @@ The signature payload is:
 
 Verify the `v1` value with the store webhook secret.
 
+## Commands
+
+```sh
+qpayd --config qpayd.toml check
+qpayd --config qpayd.toml migrate
+qpayd --config qpayd.toml serve
+qpayd --config qpayd.toml sync-once
+```
+
 ## License
 
 MIT
