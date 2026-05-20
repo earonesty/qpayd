@@ -5,14 +5,16 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use bitcoin::secp256k1::Secp256k1;
 use chrono::{Duration, Utc};
 use miniscript::{Descriptor, DescriptorPublicKey};
+use qrcode::{QrCode, render::svg};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde::{Deserialize, Serialize};
+use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::{
@@ -35,8 +37,20 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(index))
         .route("/healthz", get(healthz))
         .route(
-            "/p/{store_id}/{payment_link_id}",
-            get(payment_link).post(create_payment_link_invoice),
+            "/v1/public/stores/{store_id}/payment-links/{payment_link_id}/invoices",
+            post(create_public_payment_link_invoice),
+        )
+        .route(
+            "/v1/public/stores/{store_id}/invoices/{invoice_id}",
+            get(get_public_invoice),
+        )
+        .route(
+            "/v1/public/stores/{store_id}/invoices/{invoice_id}/qr/bitcoin.svg",
+            get(get_public_invoice_bitcoin_qr),
+        )
+        .route(
+            "/v1/public/stores/{store_id}/invoices/{invoice_id}/qr/lightning.svg",
+            get(get_public_invoice_lightning_qr),
         )
         .route("/v1/stores/{store_id}/invoices", post(create_invoice))
         .route(
@@ -49,7 +63,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/stores/{store_id}/events/{event_id}/replay",
             post(replay_event),
         )
-        .route("/i/{store_id}/{invoice_id}", get(checkout))
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 
@@ -109,10 +123,57 @@ async fn create_invoice(
     )))
 }
 
-async fn create_payment_link_invoice(
+async fn get_public_invoice(
+    State(state): State<AppState>,
+    Path((store_id, invoice_id)): Path<(String, Uuid)>,
+) -> Result<Json<PublicInvoiceResponse>, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    let invoice = state
+        .store
+        .invoice(&store_id, invoice_id)
+        .await?
+        .ok_or(ApiError::not_found("invoice not found"))?;
+
+    Ok(Json(PublicInvoiceResponse::new(
+        invoice,
+        store_cfg.confirmations(),
+    )))
+}
+
+async fn get_public_invoice_bitcoin_qr(
+    State(state): State<AppState>,
+    Path((store_id, invoice_id)): Path<(String, Uuid)>,
+) -> Result<Response, ApiError> {
+    let invoice = state
+        .store
+        .invoice(&store_id, invoice_id)
+        .await?
+        .ok_or(ApiError::not_found("invoice not found"))?;
+    let uri = bitcoin_uri(&invoice).ok_or(ApiError::not_found("invoice has no bitcoin address"))?;
+    svg_qr_response(&uri)
+}
+
+async fn get_public_invoice_lightning_qr(
+    State(state): State<AppState>,
+    Path((store_id, invoice_id)): Path<(String, Uuid)>,
+) -> Result<Response, ApiError> {
+    let invoice = state
+        .store
+        .invoice(&store_id, invoice_id)
+        .await?
+        .ok_or(ApiError::not_found("invoice not found"))?;
+    let uri =
+        lightning_uri(&invoice).ok_or(ApiError::not_found("invoice has no lightning invoice"))?;
+    svg_qr_response(&uri)
+}
+
+async fn create_public_payment_link_invoice(
     State(state): State<AppState>,
     Path((store_id, payment_link_id)): Path<(String, String)>,
-) -> Result<Redirect, ApiError> {
+) -> Result<Json<PublicInvoiceResponse>, ApiError> {
     let store_cfg = state
         .config
         .store(&store_id)
@@ -131,52 +192,9 @@ async fn create_payment_link_invoice(
     )
     .await?;
 
-    Ok(Redirect::to(&invoice.checkout_url))
-}
-
-async fn payment_link(
-    State(state): State<AppState>,
-    Path((store_id, payment_link_id)): Path<(String, String)>,
-) -> Result<Html<String>, ApiError> {
-    let store_cfg = state
-        .config
-        .store(&store_id)
-        .ok_or(ApiError::not_found("store not found"))?;
-    let payment_link = store_cfg
-        .payment_link(&payment_link_id)
-        .ok_or(ApiError::not_found("payment link not found"))?;
-    let action = format!(
-        "/p/{}/{}",
-        escape_html(&store_id),
-        escape_html(&payment_link_id)
-    );
-
-    Ok(Html(format!(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pay {amount} {currency}</title>
-  <style>
-    :root {{ color-scheme: light dark; font-family: system-ui, sans-serif; }}
-    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; }}
-    main {{ width: min(32rem, calc(100vw - 2rem)); }}
-    button {{ font: inherit; padding: 0.75rem 1rem; cursor: pointer; }}
-  </style>
-</head>
-<body>
-  <main>
-    <h1>{amount} {currency}</h1>
-    <form method="post" action="{action}">
-      <button type="submit">Pay with Bitcoin</button>
-    </form>
-  </main>
-</body>
-</html>"#,
-        amount = payment_link.amount,
-        currency = escape_html(&payment_link.currency.to_uppercase()),
-        action = action,
+    Ok(Json(PublicInvoiceResponse::new(
+        invoice,
+        store_cfg.confirmations(),
     )))
 }
 
@@ -224,12 +242,6 @@ async fn build_invoice(
 
     let now = Utc::now();
     let id = Uuid::new_v4();
-    let checkout_url = format!(
-        "{}/i/{}/{}",
-        state.config.server.public_url.trim_end_matches('/'),
-        store_id,
-        id
-    );
     let invoice = Invoice {
         id,
         store_id,
@@ -247,7 +259,6 @@ async fn build_invoice(
         rate_source: rate.source,
         rate: rate.value,
         metadata,
-        checkout_url,
         expires_at: now + Duration::minutes(store_cfg.expiry_minutes() as i64),
         created_at: now,
         updated_at: now,
@@ -260,15 +271,6 @@ async fn build_invoice(
         .await?;
 
     Ok(invoice)
-}
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
 
 async fn list_events(
@@ -359,61 +361,6 @@ async fn get_invoice(
     )))
 }
 
-async fn checkout(
-    State(state): State<AppState>,
-    Path((store_id, invoice_id)): Path<(String, Uuid)>,
-) -> Result<Html<String>, ApiError> {
-    let invoice = state
-        .store
-        .invoice(&store_id, invoice_id)
-        .await?
-        .ok_or(ApiError::not_found("invoice not found"))?;
-    let sats = invoice.btc_amount_sats;
-    let btc = Decimal::from(sats) / Decimal::from(100_000_000u64);
-    let address = invoice
-        .onchain_address
-        .as_deref()
-        .unwrap_or("no on-chain address configured");
-    let lightning = invoice.lightning_bolt11.as_deref().unwrap_or("");
-
-    Ok(Html(format!(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pay invoice {id}</title>
-  <style>
-    :root {{ color-scheme: light dark; font-family: system-ui, sans-serif; }}
-    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; }}
-    main {{ width: min(38rem, calc(100vw - 2rem)); }}
-    code {{ overflow-wrap: anywhere; }}
-  </style>
-</head>
-<body>
-  <main>
-    <h1>{amount} {currency}</h1>
-    <p>Status: <strong>{status}</strong></p>
-    <p>BTC amount: <strong>{btc}</strong> BTC ({sats} sats)</p>
-    <p>Address: <code>{address}</code></p>
-    <p>Lightning: <code>{lightning}</code></p>
-    <p>Invoice: <code>{id}</code></p>
-    <p>Expires: {expires}</p>
-  </main>
-</body>
-</html>"#,
-        id = invoice.id,
-        amount = invoice.amount,
-        currency = invoice.currency,
-        status = invoice.status.as_str(),
-        btc = btc,
-        sats = sats,
-        address = address,
-        lightning = lightning,
-        expires = invoice.expires_at.to_rfc3339(),
-    )))
-}
-
 fn authorize(store: &crate::config::StoreConfig, headers: &HeaderMap) -> Result<(), ApiError> {
     let expected = store.api_token()?;
     let Some(value) = headers.get(header::AUTHORIZATION) else {
@@ -447,6 +394,38 @@ fn sats_for(amount: Decimal, btc_quote_rate: Decimal) -> anyhow::Result<u64> {
         .ok_or_else(|| anyhow::anyhow!("amount is outside supported range"))
 }
 
+fn bitcoin_uri(invoice: &Invoice) -> Option<String> {
+    let address = invoice.onchain_address.as_ref()?;
+    let btc = Decimal::from(invoice.btc_amount_sats) / Decimal::from(100_000_000u64);
+    Some(format!("bitcoin:{address}?amount={btc}"))
+}
+
+fn lightning_uri(invoice: &Invoice) -> Option<String> {
+    invoice
+        .lightning_bolt11
+        .as_ref()
+        .map(|bolt11| format!("lightning:{bolt11}"))
+}
+
+fn svg_qr_response(value: &str) -> Result<Response, ApiError> {
+    let code = QrCode::new(value.as_bytes()).map_err(|error| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        message: error.to_string(),
+    })?;
+    let body = code
+        .render::<svg::Color<'_>>()
+        .min_dimensions(256, 256)
+        .dark_color(svg::Color("#08100c"))
+        .light_color(svg::Color("#ffffff"))
+        .build();
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")],
+        body,
+    )
+        .into_response())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateInvoiceRequest {
     pub amount: Decimal,
@@ -472,11 +451,12 @@ pub struct InvoiceResponse {
     pub onchain_script_pubkey: Option<String>,
     pub lightning_bolt11: Option<String>,
     pub lightning_payment_hash: Option<String>,
+    pub bitcoin: Option<BitcoinPaymentResponse>,
+    pub lightning: Option<LightningPaymentResponse>,
     pub min_confirmations: u32,
     pub rate_source: String,
     pub rate: Decimal,
     pub metadata: serde_json::Value,
-    pub checkout_url: String,
     pub expires_at: chrono::DateTime<Utc>,
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: chrono::DateTime<Utc>,
@@ -484,8 +464,26 @@ pub struct InvoiceResponse {
 
 impl InvoiceResponse {
     fn new(invoice: Invoice, min_confirmations: u32) -> Self {
+        let id = invoice.id;
+        let store_id = invoice.store_id.clone();
+        let bitcoin = invoice
+            .onchain_address
+            .as_ref()
+            .map(|address| BitcoinPaymentResponse {
+                address: address.clone(),
+                uri: bitcoin_uri(&invoice).expect("address exists"),
+                qr_svg_url: format!("/v1/public/stores/{store_id}/invoices/{id}/qr/bitcoin.svg"),
+            });
+        let lightning = invoice
+            .lightning_bolt11
+            .as_ref()
+            .map(|bolt11| LightningPaymentResponse {
+                bolt11: bolt11.clone(),
+                uri: lightning_uri(&invoice).expect("bolt11 exists"),
+                qr_svg_url: format!("/v1/public/stores/{store_id}/invoices/{id}/qr/lightning.svg"),
+            });
         Self {
-            id: invoice.id,
+            id,
             store_id: invoice.store_id,
             status: invoice.status,
             amount: invoice.amount,
@@ -496,11 +494,85 @@ impl InvoiceResponse {
             onchain_script_pubkey: invoice.onchain_script_pubkey,
             lightning_bolt11: invoice.lightning_bolt11,
             lightning_payment_hash: invoice.lightning_payment_hash,
+            bitcoin,
+            lightning,
             min_confirmations,
             rate_source: invoice.rate_source,
             rate: invoice.rate,
             metadata: invoice.metadata,
-            checkout_url: invoice.checkout_url,
+            expires_at: invoice.expires_at,
+            created_at: invoice.created_at,
+            updated_at: invoice.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct PublicInvoiceResponse {
+    pub id: Uuid,
+    pub store_id: String,
+    pub status: InvoiceStatus,
+    pub amount: Decimal,
+    pub currency: String,
+    pub btc_amount_sats: u64,
+    pub bitcoin: Option<BitcoinPaymentResponse>,
+    pub lightning: Option<LightningPaymentResponse>,
+    pub min_confirmations: u32,
+    pub rate_source: String,
+    pub rate: Decimal,
+    pub metadata: serde_json::Value,
+    pub expires_at: chrono::DateTime<Utc>,
+    pub created_at: chrono::DateTime<Utc>,
+    pub updated_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BitcoinPaymentResponse {
+    pub address: String,
+    pub uri: String,
+    pub qr_svg_url: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LightningPaymentResponse {
+    pub bolt11: String,
+    pub uri: String,
+    pub qr_svg_url: String,
+}
+
+impl PublicInvoiceResponse {
+    fn new(invoice: Invoice, min_confirmations: u32) -> Self {
+        let id = invoice.id;
+        let store_id = invoice.store_id.clone();
+        let bitcoin = invoice
+            .onchain_address
+            .as_ref()
+            .map(|address| BitcoinPaymentResponse {
+                address: address.clone(),
+                uri: bitcoin_uri(&invoice).expect("address exists"),
+                qr_svg_url: format!("/v1/public/stores/{store_id}/invoices/{id}/qr/bitcoin.svg"),
+            });
+        let lightning = invoice
+            .lightning_bolt11
+            .as_ref()
+            .map(|bolt11| LightningPaymentResponse {
+                bolt11: bolt11.clone(),
+                uri: lightning_uri(&invoice).expect("bolt11 exists"),
+                qr_svg_url: format!("/v1/public/stores/{store_id}/invoices/{id}/qr/lightning.svg"),
+            });
+        Self {
+            id,
+            store_id: invoice.store_id,
+            status: invoice.status,
+            amount: invoice.amount,
+            currency: invoice.currency,
+            btc_amount_sats: invoice.btc_amount_sats,
+            bitcoin,
+            lightning,
+            min_confirmations,
+            rate_source: invoice.rate_source,
+            rate: invoice.rate,
+            metadata: invoice.metadata,
             expires_at: invoice.expires_at,
             created_at: invoice.created_at,
             updated_at: invoice.updated_at,
@@ -560,7 +632,7 @@ mod tests {
     use async_trait::async_trait;
     use axum::{
         body::{Body, to_bytes},
-        http::{Method, Request, StatusCode},
+        http::{Request, StatusCode, header},
     };
     use rust_decimal::Decimal;
     use tower::ServiceExt;
@@ -579,38 +651,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_payment_link_redirects_to_checkout() {
+    async fn create_invoice_returns_api_json_without_checkout_url() {
+        // SAFETY: this test uses a single fixed value and does not depend on
+        // concurrent mutation of the same environment variable.
+        unsafe {
+            std::env::set_var("QPAYD_MAIN_API_TOKEN", "test-token");
+        }
         let app = test_app().await;
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/p/main/donate-10")
-                    .method(Method::POST)
-                    .body(Body::empty())
+                    .method("POST")
+                    .uri("/v1/stores/main/invoices")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"amount":"10.00","currency":"USD","metadata":{"source":"test"}}"#,
+                    ))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        let location = response
-            .headers()
-            .get("location")
-            .unwrap()
-            .to_str()
-            .unwrap();
-        assert!(location.starts_with("https://pay.example.com/i/main/"));
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["status"], "new");
+        assert_eq!(body["onchain_address_index"], 0);
+        assert!(body.get("checkout_url").is_none());
     }
 
     #[tokio::test]
-    async fn public_payment_link_get_renders_payment_button_without_creating_invoice() {
+    async fn public_payment_link_creates_invoice_json() {
         let app = test_app().await;
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/p/main/donate-10")
+                    .method("POST")
+                    .uri("/v1/public/stores/main/payment-links/donate-10/invoices")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -619,14 +701,51 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let body = std::str::from_utf8(&body).unwrap();
-        assert!(body.contains("Pay with Bitcoin"));
-        assert!(body.contains("method=\"post\""));
-        assert!(body.contains("action=\"/p/main/donate-10\""));
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["amount"], "10.00");
+        assert_eq!(body["currency"], "USD");
+        assert_eq!(body["metadata"]["kind"], "donation");
+        assert!(
+            body["bitcoin"]["address"]
+                .as_str()
+                .unwrap()
+                .starts_with("bc1")
+        );
+        assert!(
+            body["bitcoin"]["uri"]
+                .as_str()
+                .unwrap()
+                .starts_with("bitcoin:bc1")
+        );
+        assert_eq!(
+            body["bitcoin"]["qr_svg_url"],
+            format!(
+                "/v1/public/stores/main/invoices/{}/qr/bitcoin.svg",
+                body["id"].as_str().unwrap()
+            )
+        );
+        assert!(body.get("checkout_url").is_none());
+
+        let qr_response = app
+            .oneshot(
+                Request::builder()
+                    .uri(body["bitcoin"]["qr_svg_url"].as_str().unwrap())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(qr_response.status(), StatusCode::OK);
+        assert_eq!(
+            qr_response.headers()[header::CONTENT_TYPE],
+            "image/svg+xml; charset=utf-8"
+        );
+        let qr_body = to_bytes(qr_response.into_body(), usize::MAX).await.unwrap();
+        assert!(std::str::from_utf8(&qr_body).unwrap().contains("<svg"));
     }
 
     async fn test_app() -> axum::Router {
-        let config = public_payment_link_config();
+        let config = test_config();
         let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
         store.migrate().await.unwrap();
         router(AppState {
@@ -636,12 +755,9 @@ mod tests {
         })
     }
 
-    fn public_payment_link_config() -> Config {
+    fn test_config() -> Config {
         let config: Config = toml::from_str(
             r#"
-            [server]
-            public_url = "https://pay.example.com"
-
             [database]
             url = "sqlite::memory:"
 
@@ -659,7 +775,7 @@ mod tests {
             id = "donate-10"
             amount = "10.00"
             currency = "USD"
-            metadata = { source = "github-pages" }
+            metadata = { kind = "donation" }
             "#,
         )
         .unwrap();

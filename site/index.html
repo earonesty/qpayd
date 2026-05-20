@@ -199,13 +199,18 @@
     .terminal .blue { color: var(--blue); }
     .terminal .amber { color: var(--amber); }
 
+    .stats-band {
+      padding: 0 0 72px;
+    }
+
     .stats {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 1px;
+      max-width: 1040px;
       border: 1px solid var(--line);
       background: var(--line);
-      margin: 8px 0 72px;
+      margin: 8px auto 0;
     }
 
     .stat {
@@ -421,12 +426,14 @@
       </div>
     </section>
 
-    <div class="shell stats" aria-label="qpayd highlights">
-      <div class="stat"><strong>Fast</strong><span>Built for quick warm starts and quiet idle deployments.</span></div>
-      <div class="stat"><strong>Small</strong><span>Low memory Rust service with no app code on the payment box.</span></div>
-      <div class="stat"><strong>Flexible</strong><span>SQLite for simple installs, Postgres when you outgrow a single node.</span></div>
-      <div class="stat"><strong>Multi-store</strong><span>One daemon can serve separate projects with separate tokens and webhooks.</span></div>
-    </div>
+    <section class="stats-band" aria-label="qpayd highlights">
+      <div class="shell stats">
+        <div class="stat"><strong>Fast</strong><span>Built for quick warm starts and quiet idle deployments.</span></div>
+        <div class="stat"><strong>Small</strong><span>Low memory Rust service with no app code on the payment box.</span></div>
+        <div class="stat"><strong>Flexible</strong><span>SQLite for simple installs, Postgres when you outgrow a single node.</span></div>
+        <div class="stat"><strong>Multi-store</strong><span>One daemon can serve separate projects with separate tokens and webhooks.</span></div>
+      </div>
+    </section>
 
     <section id="features" class="shell section">
       <div class="section-head">
@@ -448,7 +455,7 @@
         </article>
         <article class="tile">
           <h3>No browser secrets</h3>
-          <p>Static sites can use hosted payment links, and private API tokens stay on servers where they belong.</p>
+          <p>Static sites can create configured payment-link invoices from JSON, while private API tokens stay on servers where they belong.</p>
         </article>
         <article class="tile">
           <h3>Migrate on boot</h3>
@@ -464,7 +471,7 @@
     <section id="stores" class="shell section">
       <div class="section-head">
         <h2>One daemon, many stores.</h2>
-        <p>Each store owns its API token, wallet descriptor, checkout settings, webhook target, and static payment links.</p>
+        <p>Each store owns its API token, wallet descriptor, webhook target, and configured payment links.</p>
       </div>
       <div class="split">
         <div class="panel">
@@ -484,10 +491,8 @@ currency = "USD"</code></pre>
         </div>
         <div id="donate" class="panel donate">
           <strong>Send a small Bitcoin donation.</strong>
-          <p>This button uses qpayd's hosted payment-link flow. The page is static; the invoice is created only when you click.</p>
-          <form method="post" action="https://pay-q32.fly.dev/p/q32/qpayd-donate">
-            <button class="button primary" type="submit">Donate $10 in Bitcoin</button>
-          </form>
+          <p>This button uses the qpayd JS modal with a public JSON payment link. The invoice is created only when you click.</p>
+          <button id="qpayd-donate-button" class="button primary" type="button">Donate $10 in Bitcoin</button>
         </div>
       </div>
     </section>
@@ -496,5 +501,24 @@ currency = "USD"</code></pre>
   <footer class="shell">
     <span>qpayd is MIT licensed and built at <a href="https://github.com/earonesty/qpayd">github.com/earonesty/qpayd</a>.</span>
   </footer>
+  <script type="module">
+    import { openPaymentLink } from "./js/src/index.js";
+
+    const donateButton = document.querySelector("#qpayd-donate-button");
+    donateButton.addEventListener("click", async () => {
+      donateButton.disabled = true;
+      try {
+        await openPaymentLink({
+          baseUrl: "https://pay-q32.fly.dev",
+          storeId: "q32",
+          paymentLinkId: "qpayd-donate"
+        });
+      } catch (error) {
+        alert(error.message);
+      } finally {
+        donateButton.disabled = false;
+      }
+    });
+  </script>
 </body>
 </html>

@@ -163,8 +163,8 @@ impl Store for SqliteStore {
                 id, store_id, status, amount, currency, btc_amount_sats,
                 onchain_address, onchain_address_index, onchain_script_pubkey,
                 lightning_bolt11, lightning_payment_hash, rate_source, rate,
-                metadata, checkout_url, expires_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                metadata, expires_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(invoice.id.to_string())
@@ -181,7 +181,6 @@ impl Store for SqliteStore {
         .bind(&invoice.rate_source)
         .bind(invoice.rate.to_string())
         .bind(invoice.metadata.to_string())
-        .bind(&invoice.checkout_url)
         .bind(invoice.expires_at.to_rfc3339())
         .bind(invoice.created_at.to_rfc3339())
         .bind(invoice.updated_at.to_rfc3339())
@@ -204,7 +203,7 @@ impl Store for SqliteStore {
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata, checkout_url,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata,
                    expires_at, created_at, updated_at
             FROM invoices
             WHERE store_id = ? AND id = ?
@@ -226,7 +225,7 @@ impl Store for SqliteStore {
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata, checkout_url,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata,
                    expires_at, created_at, updated_at
             FROM invoices
             WHERE store_id = ?
@@ -246,7 +245,7 @@ impl Store for SqliteStore {
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata, checkout_url,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata,
                    expires_at, created_at, updated_at
             FROM invoices
             WHERE store_id = ?
@@ -487,8 +486,8 @@ impl Store for PostgresStore {
                 id, store_id, status, amount, currency, btc_amount_sats,
                 onchain_address, onchain_address_index, onchain_script_pubkey,
                 lightning_bolt11, lightning_payment_hash, rate_source, rate,
-                metadata, checkout_url, expires_at, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                metadata, expires_at, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             "#,
         )
         .bind(invoice.id.to_string())
@@ -505,7 +504,6 @@ impl Store for PostgresStore {
         .bind(&invoice.rate_source)
         .bind(invoice.rate.to_string())
         .bind(invoice.metadata.to_string())
-        .bind(&invoice.checkout_url)
         .bind(invoice.expires_at.to_rfc3339())
         .bind(invoice.created_at.to_rfc3339())
         .bind(invoice.updated_at.to_rfc3339())
@@ -528,7 +526,7 @@ impl Store for PostgresStore {
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata, checkout_url,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata,
                    expires_at, created_at, updated_at
             FROM qpayd_invoices
             WHERE store_id = $1 AND id = $2
@@ -550,7 +548,7 @@ impl Store for PostgresStore {
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata, checkout_url,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata,
                    expires_at, created_at, updated_at
             FROM qpayd_invoices
             WHERE store_id = $1
@@ -570,7 +568,7 @@ impl Store for PostgresStore {
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata, checkout_url,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata,
                    expires_at, created_at, updated_at
             FROM qpayd_invoices
             WHERE store_id = $1
@@ -784,7 +782,6 @@ const SQLITE_MIGRATIONS: &[Migration] = &[Migration {
             rate_source TEXT NOT NULL,
             rate TEXT NOT NULL,
             metadata TEXT NOT NULL,
-            checkout_url TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -857,7 +854,6 @@ const POSTGRES_MIGRATIONS: &[Migration] = &[Migration {
             rate_source TEXT NOT NULL,
             rate TEXT NOT NULL,
             metadata TEXT NOT NULL,
-            checkout_url TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -1096,7 +1092,6 @@ fn invoice_from_row(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<Invoice> {
         rate_source: row.get("rate_source"),
         rate: row.get::<String, _>("rate").parse::<Decimal>()?,
         metadata: serde_json::from_str(row.get::<String, _>("metadata").as_str())?,
-        checkout_url: row.get("checkout_url"),
         expires_at: DateTime::parse_from_rfc3339(row.get::<String, _>("expires_at").as_str())?
             .with_timezone(&Utc),
         created_at: DateTime::parse_from_rfc3339(row.get::<String, _>("created_at").as_str())?
@@ -1124,7 +1119,6 @@ fn invoice_from_pg_row(row: sqlx::postgres::PgRow) -> anyhow::Result<Invoice> {
         rate_source: row.get("rate_source"),
         rate: row.get::<String, _>("rate").parse::<Decimal>()?,
         metadata: serde_json::from_str(row.get::<String, _>("metadata").as_str())?,
-        checkout_url: row.get("checkout_url"),
         expires_at: DateTime::parse_from_rfc3339(row.get::<String, _>("expires_at").as_str())?
             .with_timezone(&Utc),
         created_at: DateTime::parse_from_rfc3339(row.get::<String, _>("created_at").as_str())?
@@ -1398,7 +1392,6 @@ mod tests {
             rate_source: "kraken".to_string(),
             rate: Decimal::from(100_000),
             metadata: serde_json::json!({ "order_id": "ord_123" }),
-            checkout_url: "https://pay.example.com/i/main/test".to_string(),
             expires_at: now + Duration::minutes(15),
             created_at: now,
             updated_at: now,

@@ -153,7 +153,6 @@ mod tests {
             rate_source: "test".to_string(),
             rate: Decimal::from(100_000),
             metadata: serde_json::json!({}),
-            checkout_url: "http://localhost/i/main/test".to_string(),
             expires_at,
             created_at: expires_at,
             updated_at: expires_at,

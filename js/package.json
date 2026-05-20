@@ -1,0 +1,16 @@
+{
+  "name": "@qpayd/js",
+  "version": "0.1.0",
+  "description": "Browser client and modal checkout UI for qpayd.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT"
+}

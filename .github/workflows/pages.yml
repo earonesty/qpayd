@@ -24,8 +24,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      - name: Build static site
+        run: |
+          set -euo pipefail
+          mkdir -p public
+          cp -R site/. public/
+          cp -R js public/js
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: public
       - id: deployment
         uses: actions/deploy-pages@v4
