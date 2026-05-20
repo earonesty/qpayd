@@ -57,7 +57,16 @@ electrum_servers = ["ssl://electrum.blockstream.info:50002"]
 [stores.lightning]
 backend = "phoenixd"
 url = "http://127.0.0.1:9740"
-api_password_env = "PHOENIXD_PASSWORD"
+api_password_env = "PHOENIXD_LIMITED_PASSWORD"
+
+[stores.lightning_sweep]
+backend = "phoenixd"
+url = "http://127.0.0.1:9740"
+full_api_password_env = "PHOENIXD_FULL_PASSWORD"
+destination_descriptor_env = "QPAYD_MAIN_TREASURY_DESCRIPTOR"
+min_balance_sats = 100000
+target_balance_sats = 25000
+interval_seconds = 3600
 
 [[stores.payment_links]]
 id = "donate-10"
@@ -70,12 +79,27 @@ metadata = { kind = "donation", source = "static-site" }
 With Phoenixd configured, qpayd creates BOLT11 invoices and polls Phoenixd for
 incoming payment status during reconciliation.
 
+With `lightning_sweep` configured, qpayd periodically checks the Lightning
+balance and sends funds above `min_balance_sats` to the configured treasury
+descriptor, leaving `target_balance_sats` on the Lightning backend. Use a
+limited Phoenixd password for invoice creation and a separate full-access
+password only for sweeping.
+
+Run a manual sweep check with:
+
+```sh
+qpayd --config qpayd.toml sweep-once
+```
+
 Then set the token:
 
 ```sh
 export QPAYD_MAIN_API_TOKEN="$(openssl rand -hex 32)"
 export QPAYD_MAIN_WEBHOOK_SECRET="$(openssl rand -hex 32)"
 export QPAYD_MAIN_DESCRIPTOR="wpkh([00000000/84h/0h/0h]xpub.../0/*)"
+export QPAYD_MAIN_TREASURY_DESCRIPTOR="wpkh([00000000/84h/0h/0h]xpub.../0/*)"
+export PHOENIXD_LIMITED_PASSWORD="$(openssl rand -hex 32)"
+export PHOENIXD_FULL_PASSWORD="$(openssl rand -hex 32)"
 ```
 
 ## Link A Bitcoin Wallet
