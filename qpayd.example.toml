@@ -1,0 +1,27 @@
+[server]
+listen = "127.0.0.1:8080"
+public_url = "http://127.0.0.1:8080"
+
+[database]
+url = "sqlite://qpayd.db"
+
+[pricing]
+kraken_url = "https://api.kraken.com/0/public/Ticker"
+stale_after_seconds = 60
+
+[[stores]]
+id = "main"
+name = "Main Store"
+api_token_env = "QPAYD_MAIN_API_TOKEN"
+invoice_expiry_minutes = 15
+min_confirmations = 1
+
+[stores.onchain]
+network = "bitcoin"
+descriptor = "tr(xpub6BgBgsespWvERF3LHQu6CnqdvfEvtMcQjYrcRzx53QJjSxarj2afYWcLteoGVky7D3UKDP9QyrLprQ3VCECoY49yfdDEHGCtMMj92pReUsQ/0/*)"
+electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+
+[stores.lightning]
+backend = "phoenixd"
+url = "http://127.0.0.1:9740"
+api_password_env = "PHOENIXD_PASSWORD"
