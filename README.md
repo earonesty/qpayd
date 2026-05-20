@@ -4,6 +4,8 @@
 invoices, locks fiat prices to BTC using configured rate sources, serves checkout
 pages, tracks payment state, and emits signed webhooks.
 
+Project page: <https://earonesty.github.io/qpayd/>
+
 ## Install
 
 ```sh
