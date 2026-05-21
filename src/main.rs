@@ -22,6 +22,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use crate::{
     api::AppState,
     config::Config,
+    invoice::{InvoiceStatusUpdate, PaymentAmounts},
     pricing::KrakenRateSource,
     storage::{Store, connect_store},
 };
@@ -156,6 +157,11 @@ async fn sync_once(config: Config, store: Arc<dyn Store>) -> anyhow::Result<()> 
                     store_config.webhook_url.as_deref(),
                     invoice,
                     observation.next_status,
+                    PaymentAmounts {
+                        paid_sats: observation.confirmed_sats + observation.unconfirmed_sats,
+                        confirmed_sats: observation.confirmed_sats,
+                        unconfirmed_sats: observation.unconfirmed_sats,
+                    },
                 )
                 .await?;
             }
@@ -164,12 +170,17 @@ async fn sync_once(config: Config, store: Arc<dyn Store>) -> anyhow::Result<()> 
         if let Some(lightning_config) = &store_config.lightning {
             let invoices = store.active_lightning_invoices(&store_config.id).await?;
             for invoice in invoices {
-                let next_status = lightning::observe(lightning_config, &invoice).await?;
+                let observation = lightning::observe(lightning_config, &invoice).await?;
                 update_invoice_status_event(
                     store.clone(),
                     store_config.webhook_url.as_deref(),
                     invoice,
-                    next_status,
+                    observation.next_status,
+                    PaymentAmounts {
+                        paid_sats: observation.received_sats,
+                        confirmed_sats: observation.received_sats,
+                        unconfirmed_sats: 0,
+                    },
                 )
                 .await?;
             }
@@ -179,11 +190,13 @@ async fn sync_once(config: Config, store: Arc<dyn Store>) -> anyhow::Result<()> 
             .expirable_invoices(&store_config.id, chrono::Utc::now())
             .await?;
         for invoice in invoices {
+            let payment = PaymentAmounts::from_invoice(&invoice);
             update_invoice_status_event(
                 store.clone(),
                 store_config.webhook_url.as_deref(),
                 invoice,
                 invoice::InvoiceStatus::Expired,
+                payment,
             )
             .await?;
         }
@@ -271,20 +284,38 @@ fn derive_lightning_sweep_address(
 async fn update_invoice_status_event(
     store: Arc<dyn Store>,
     webhook_url: Option<&str>,
-    invoice: invoice::Invoice,
+    mut invoice: invoice::Invoice,
     new_status: invoice::InvoiceStatus,
+    payment: PaymentAmounts,
 ) -> anyhow::Result<()> {
+    let payment_changed = PaymentAmounts::from_invoice(&invoice) != payment;
     if new_status == invoice.status {
+        if payment_changed {
+            store
+                .update_invoice_payment_amounts(
+                    &invoice.store_id,
+                    invoice.id,
+                    payment,
+                    chrono::Utc::now(),
+                )
+                .await?;
+        }
         return Ok(());
     }
     let updated_at = chrono::Utc::now();
+    invoice.paid_sats = payment.paid_sats;
+    invoice.confirmed_sats = payment.confirmed_sats;
+    invoice.unconfirmed_sats = payment.unconfirmed_sats;
     let event = events::invoice_status_event(&invoice, new_status, updated_at);
     store
         .update_invoice_status(
             &invoice.store_id,
             invoice.id,
-            new_status,
-            updated_at,
+            InvoiceStatusUpdate {
+                status: new_status,
+                payment,
+                updated_at,
+            },
             &event,
             webhook_url,
         )

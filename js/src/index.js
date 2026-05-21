@@ -160,7 +160,7 @@ function handleTerminal(state) {
 function renderInvoice(root, client, invoice) {
   root.querySelector("[data-qpayd-status]").textContent = statusLabel(invoice.status);
   root.querySelector("[data-qpayd-status]").dataset.status = invoice.status;
-  root.querySelector("[data-qpayd-sats]").textContent = `${invoice.btc_amount_sats.toLocaleString()} sats`;
+  root.querySelector("[data-qpayd-sats]").textContent = satsLabel(invoice);
   root.querySelector("[data-qpayd-fiat]").textContent = `${invoice.amount} ${invoice.currency}`;
   root.querySelector("[data-qpayd-expiry]").textContent = formatExpiry(invoice.expires_at);
 
@@ -243,6 +243,16 @@ function statusLabel(status) {
     paid_late: "Paid late",
     invalid: "Invalid"
   }[status] ?? status;
+}
+
+function satsLabel(invoice) {
+  if (invoice.overpaid_sats > 0) {
+    return `${invoice.paid_sats.toLocaleString()} sats paid`;
+  }
+  if (invoice.paid_sats > 0 && invoice.remaining_sats > 0) {
+    return `${invoice.remaining_sats.toLocaleString()} sats due`;
+  }
+  return `${invoice.btc_amount_sats.toLocaleString()} sats`;
 }
 
 function formatExpiry(value) {

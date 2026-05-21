@@ -301,6 +301,11 @@ Response:
   "amount": "25.00",
   "currency": "USD",
   "btc_amount_sats": 25000,
+  "paid_sats": 0,
+  "confirmed_sats": 0,
+  "unconfirmed_sats": 0,
+  "remaining_sats": 25000,
+  "overpaid_sats": 0,
   "onchain_address": "bc1p...",
   "onchain_address_index": 0,
   "onchain_script_pubkey": "5120...",
@@ -367,6 +372,11 @@ Response:
   "amount": "10.00",
   "currency": "USD",
   "btc_amount_sats": 10000,
+  "paid_sats": 0,
+  "confirmed_sats": 0,
+  "unconfirmed_sats": 0,
+  "remaining_sats": 10000,
+  "overpaid_sats": 0,
   "bitcoin": {
     "address": "bc1q...",
     "uri": "bitcoin:bc1q...?amount=0.00010000",
@@ -429,6 +439,12 @@ Use `payment_detected` as a pending on-chain state: qpayd has seen enough
 unconfirmed sats, but the payment is not confirmed yet. Use `partially_paid`
 for customer support or retry flows. Use `expired` to release inventory. Use
 `paid_late` for manual handling after the invoice window has closed.
+
+Every invoice response and webhook includes observed payment amounts:
+`paid_sats`, `confirmed_sats`, `unconfirmed_sats`, `remaining_sats`, and
+`overpaid_sats`. For on-chain invoices, `paid_sats` is confirmed plus
+unconfirmed sats seen at the invoice address. For Lightning invoices, it is the
+settled amount reported by the configured Lightning backend.
 
 The server loop and `sync-once` expire unpaid invoices after `expires_at`.
 Invoices in `payment_detected` are not expired by the expiry sweep; they stay

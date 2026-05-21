@@ -39,12 +39,23 @@ pub fn invoice_status_event(
 }
 
 fn invoice_event(invoice: &Invoice, event_type: &str, created_at: DateTime<Utc>) -> EventEnvelope {
+    let mut data = serde_json::to_value(invoice).expect("invoice serializes");
+    if let Some(object) = data.as_object_mut() {
+        object.insert(
+            "remaining_sats".to_string(),
+            serde_json::json!(invoice.btc_amount_sats.saturating_sub(invoice.paid_sats)),
+        );
+        object.insert(
+            "overpaid_sats".to_string(),
+            serde_json::json!(invoice.paid_sats.saturating_sub(invoice.btc_amount_sats)),
+        );
+    }
     EventEnvelope {
         id: invoice_event_id(invoice.id, event_type),
         event_type: event_type.to_string(),
         store_id: invoice.store_id.clone(),
         invoice_id: Some(invoice.id),
-        data: serde_json::to_value(invoice).expect("invoice serializes"),
+        data,
         created_at,
     }
 }

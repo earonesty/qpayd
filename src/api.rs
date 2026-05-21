@@ -322,6 +322,9 @@ async fn build_invoice(
         amount,
         currency,
         btc_amount_sats,
+        paid_sats: 0,
+        confirmed_sats: 0,
+        unconfirmed_sats: 0,
         onchain_address,
         onchain_address_index,
         onchain_script_pubkey,
@@ -675,6 +678,11 @@ pub struct InvoiceResponse {
     pub amount: Decimal,
     pub currency: String,
     pub btc_amount_sats: u64,
+    pub paid_sats: u64,
+    pub confirmed_sats: u64,
+    pub unconfirmed_sats: u64,
+    pub remaining_sats: u64,
+    pub overpaid_sats: u64,
     pub onchain_address: Option<String>,
     pub onchain_address_index: Option<u32>,
     pub onchain_script_pubkey: Option<String>,
@@ -718,6 +726,11 @@ impl InvoiceResponse {
             amount: invoice.amount,
             currency: invoice.currency,
             btc_amount_sats: invoice.btc_amount_sats,
+            paid_sats: invoice.paid_sats,
+            confirmed_sats: invoice.confirmed_sats,
+            unconfirmed_sats: invoice.unconfirmed_sats,
+            remaining_sats: invoice.btc_amount_sats.saturating_sub(invoice.paid_sats),
+            overpaid_sats: invoice.paid_sats.saturating_sub(invoice.btc_amount_sats),
             onchain_address: invoice.onchain_address,
             onchain_address_index: invoice.onchain_address_index,
             onchain_script_pubkey: invoice.onchain_script_pubkey,
@@ -744,6 +757,11 @@ pub struct PublicInvoiceResponse {
     pub amount: Decimal,
     pub currency: String,
     pub btc_amount_sats: u64,
+    pub paid_sats: u64,
+    pub confirmed_sats: u64,
+    pub unconfirmed_sats: u64,
+    pub remaining_sats: u64,
+    pub overpaid_sats: u64,
     pub bitcoin: Option<BitcoinPaymentResponse>,
     pub lightning: Option<LightningPaymentResponse>,
     pub min_confirmations: u32,
@@ -796,6 +814,11 @@ impl PublicInvoiceResponse {
             amount: invoice.amount,
             currency: invoice.currency,
             btc_amount_sats: invoice.btc_amount_sats,
+            paid_sats: invoice.paid_sats,
+            confirmed_sats: invoice.confirmed_sats,
+            unconfirmed_sats: invoice.unconfirmed_sats,
+            remaining_sats: invoice.btc_amount_sats.saturating_sub(invoice.paid_sats),
+            overpaid_sats: invoice.paid_sats.saturating_sub(invoice.btc_amount_sats),
             bitcoin,
             lightning,
             min_confirmations,
@@ -916,6 +939,9 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["status"], "new");
         assert_eq!(body["onchain_address_index"], 0);
+        assert_eq!(body["paid_sats"], 0);
+        assert_eq!(body["remaining_sats"], body["btc_amount_sats"]);
+        assert_eq!(body["overpaid_sats"], 0);
         assert!(body.get("checkout_url").is_none());
     }
 
