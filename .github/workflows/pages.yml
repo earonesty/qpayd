@@ -27,9 +27,11 @@ jobs:
       - name: Build static site
         run: |
           set -euo pipefail
+          npm --prefix site ci
           mkdir -p public
-          cp -R site/. public/
+          cp site/index.html public/
           cp -R js public/js
+          SITE_OUT_DIR="$PWD/public" npm --prefix site run build
       - uses: actions/upload-pages-artifact@v3
         with:
           path: public

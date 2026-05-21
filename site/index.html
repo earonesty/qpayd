@@ -387,6 +387,7 @@
     <a class="brand" href="./" aria-label="qpayd home"><span class="mark">q</span><span>qpayd</span></a>
     <nav class="links" aria-label="Primary">
       <a href="#features">Features</a>
+      <a href="./docs/index.html">Docs</a>
       <a href="#stores">Stores</a>
       <a href="#donate">Donate</a>
       <a href="https://github.com/earonesty/qpayd">GitHub</a>
@@ -404,6 +405,7 @@
         </p>
         <div class="actions">
           <a class="button primary" href="https://github.com/earonesty/qpayd">View on GitHub</a>
+          <a class="button" href="./docs/index.html">Read the docs</a>
           <a class="button" href="#donate">Donate with Bitcoin</a>
         </div>
       </div>
@@ -502,7 +504,7 @@ currency = "USD"</code></pre>
     <span>qpayd is MIT licensed and built at <a href="https://github.com/earonesty/qpayd">github.com/earonesty/qpayd</a>.</span>
   </footer>
   <script type="module">
-    import { openPaymentLink } from "./js/src/index.js";
+    import { openPaymentLink } from "./js/packages/checkout/src/index.js";
 
     const donateButton = document.querySelector("#qpayd-donate-button");
     donateButton.addEventListener("click", async () => {
