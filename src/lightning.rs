@@ -67,7 +67,7 @@ pub async fn sweep_to_address(
 }
 
 pub async fn hot_balance(config: &LightningConfig) -> anyhow::Result<HotBalance> {
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
     match config.backend {
         LightningBackend::Phoenixd => {
             let password = lightning_api_secret(config)?;
@@ -110,7 +110,7 @@ async fn create_barkd_invoice(
         "{}/api/v1/lightning/receives/invoice",
         config.url.trim_end_matches('/')
     );
-    let response: BarkdInvoiceResponse = reqwest::Client::new()
+    let response: BarkdInvoiceResponse = crate::http::client()
         .post(url)
         .bearer_auth(token)
         .json(&BarkdInvoiceRequest {
@@ -139,7 +139,7 @@ async fn create_phoenixd_invoice(
 ) -> anyhow::Result<LightningInvoice> {
     let password = lightning_api_secret(config)?;
     let url = format!("{}/createinvoice", config.url.trim_end_matches('/'));
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
     let mut request = client.post(url).form(&[
         ("amountSat", amount_sats.to_string()),
         ("description", description.to_string()),
@@ -237,7 +237,7 @@ async fn get_phoenixd_incoming_payment(
         config.url.trim_end_matches('/'),
         payment_hash
     );
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
     let mut request = client.get(url);
     if let Some(password) = password {
         request = request.basic_auth("", Some(password));
@@ -268,7 +268,7 @@ async fn get_barkd_receive(
         .map_err(|_| anyhow::anyhow!("invalid barkd url"))?
         .push(identifier);
 
-    reqwest::Client::new()
+    crate::http::client()
         .get(url)
         .bearer_auth(token)
         .send()
@@ -295,7 +295,7 @@ async fn sweep_phoenixd_to_address(
 ) -> anyhow::Result<Option<SweepResult>> {
     let password = std::env::var(&config.full_api_password_env)
         .with_context(|| format!("missing env var {}", config.full_api_password_env))?;
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
     let balance = get_phoenixd_balance(config.url.as_str(), &client, &password).await?;
     let decision = sweep_decision(
         balance.balance_sats,
@@ -345,7 +345,7 @@ async fn sweep_barkd_to_address(
 ) -> anyhow::Result<Option<SweepResult>> {
     let token = std::env::var(&config.full_api_password_env)
         .with_context(|| format!("missing env var {}", config.full_api_password_env))?;
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
     let balance = get_barkd_balance(config.url.as_str(), &client, &token).await?;
     let decision = sweep_decision(
         balance.spendable_sats,
@@ -658,6 +658,7 @@ mod tests {
                 lightning_bolt11: Some("lnbc1234test".to_string()),
                 lightning_payment_hash: Some("lnbc1234test".to_string()),
                 idempotency_key: None,
+                payment_link_id: None,
                 rate_source: "test".to_string(),
                 rate: Decimal::ONE,
                 metadata: serde_json::json!({}),

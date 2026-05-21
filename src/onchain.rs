@@ -235,6 +235,7 @@ mod tests {
             lightning_bolt11: None,
             lightning_payment_hash: None,
             idempotency_key: None,
+            payment_link_id: None,
             rate_source: "test".to_string(),
             rate: Decimal::from(100_000),
             metadata: serde_json::json!({}),

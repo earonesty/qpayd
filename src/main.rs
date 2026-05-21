@@ -1,6 +1,7 @@
 mod api;
 mod config;
 mod events;
+mod http;
 mod invoice;
 mod lightning;
 mod onchain;
