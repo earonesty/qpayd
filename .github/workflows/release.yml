@@ -39,6 +39,7 @@ jobs:
       - run: cargo test
       - run: cargo clippy --all-targets -- -D warnings
       - run: npm --prefix js run check
+      - run: npm --prefix site ci
       - run: ./scripts/smoke-barkd.sh
       - run: cargo build --release --locked
 
@@ -53,6 +54,13 @@ jobs:
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
           (cd dist && sha256sum "${package}.tar.gz" > SHA256SUMS)
 
+      - name: Render admin portal docs
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          SITE_OUT_DIR="$PWD/public" npm --prefix site run build
+          OUT_DIR="$PWD/dist" QPAYD_VERSION="${tag}" npm --prefix site run render-admin-portal
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -63,5 +71,7 @@ jobs:
             --verify-tag \
             --title "qpayd ${tag}" \
             --generate-notes \
+            dist/admin-portal.md \
+            dist/admin-portal.html \
             dist/*.tar.gz \
             dist/SHA256SUMS
