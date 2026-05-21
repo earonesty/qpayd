@@ -1,6 +1,6 @@
 {
   "name": "@qpayd/checkout",
-  "version": "0.5.0",
+  "version": "0.6.1",
   "description": "Browser checkout modal and public invoice helpers for qpayd.",
   "repository": {
     "type": "git",
