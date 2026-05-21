@@ -28,7 +28,7 @@ jobs:
     env:
       PG_URL: postgres://postgres:postgres@localhost:5432/qpayd_test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
