@@ -1,9 +1,10 @@
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use tokio::sync::RwLock;
 
 use crate::config::PricingConfig;
 
@@ -22,13 +23,21 @@ pub trait RateSource: Send + Sync {
 pub struct KrakenRateSource {
     config: PricingConfig,
     client: reqwest::Client,
+    cache: Arc<RwLock<HashMap<String, CachedRate>>>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedRate {
+    rate: Rate,
+    fetched_at: std::time::Instant,
 }
 
 impl KrakenRateSource {
     pub fn new(config: PricingConfig) -> Self {
         Self {
             config,
-            client: reqwest::Client::new(),
+            client: crate::http::client(),
+            cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -44,6 +53,43 @@ impl RateSource for KrakenRateSource {
             });
         }
 
+        if let Some(rate) = self.fresh_cached_rate(&quote).await {
+            return Ok(rate);
+        }
+
+        match self.fetch_btc_rate(&quote).await {
+            Ok(rate) => {
+                self.cache.write().await.insert(
+                    quote,
+                    CachedRate {
+                        rate: rate.clone(),
+                        fetched_at: std::time::Instant::now(),
+                    },
+                );
+                Ok(rate)
+            }
+            Err(error) => {
+                if let Some(rate) = self.fresh_cached_rate(&quote).await {
+                    return Ok(rate);
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
+impl KrakenRateSource {
+    async fn fresh_cached_rate(&self, quote: &str) -> Option<Rate> {
+        let max_age = Duration::from_secs(self.config.stale_after_seconds);
+        self.cache
+            .read()
+            .await
+            .get(quote)
+            .filter(|cached| cached.fetched_at.elapsed() <= max_age)
+            .map(|cached| cached.rate.clone())
+    }
+
+    async fn fetch_btc_rate(&self, quote: &str) -> anyhow::Result<Rate> {
         let pair = format!("XBT{quote}");
         let response: KrakenTickerResponse = self
             .client

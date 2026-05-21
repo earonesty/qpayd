@@ -3,6 +3,7 @@ const TERMINAL_STATUSES = new Set(["settled", "expired", "paid_late", "invalid"]
 const ABBREVIATE_AT = 48;
 const ABBREVIATE_HEAD = 18;
 const ABBREVIATE_TAIL = 14;
+const PAYMENT_METHOD_STORAGE_KEY = "qpayd-checkout-payment-method";
 
 export class QPaydClient {
   constructor(options) {
@@ -91,6 +92,7 @@ export function openInvoiceModal(options) {
     pollIntervalMs: options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     onSettled: options.onSettled,
     onExpired: options.onExpired,
+    selectedMethod: preferredPaymentMethod(options.invoice),
     timer: 0,
     closed: false
   };
@@ -129,12 +131,19 @@ export function openInvoiceModal(options) {
   });
   root.querySelectorAll("[data-qpayd-method]").forEach((button) => {
     button.addEventListener("click", () => {
-      setMethod(root, button.getAttribute("data-qpayd-method"));
+      const method = button.getAttribute("data-qpayd-method");
+      if (setMethod(root, method)) {
+        state.selectedMethod = method;
+        savePreferredPaymentMethod(method);
+      }
     });
   });
 
-  setMethod(root, state.invoice.lightning ? "lightning" : "bitcoin");
   renderInvoice(root, state.client, state.invoice);
+  if (!setMethod(root, state.selectedMethod)) {
+    state.selectedMethod = defaultPaymentMethod(state.invoice);
+    setMethod(root, state.selectedMethod);
+  }
   poll(root, state);
 
   return {
@@ -186,6 +195,10 @@ async function poll(root, state) {
     try {
       state.invoice = await state.client.getInvoice(state.invoice.store_id, state.invoice.id);
       renderInvoice(root, state.client, state.invoice);
+      if (!setMethod(root, state.selectedMethod)) {
+        state.selectedMethod = defaultPaymentMethod(state.invoice);
+        setMethod(root, state.selectedMethod);
+      }
     } catch (error) {
       root.querySelector("[data-qpayd-error]").textContent = error.message;
     }
@@ -218,18 +231,54 @@ function renderMethod(root, client, method, payment, valueKey) {
     return;
   }
   tab.hidden = false;
+  panel.hidden = false;
   panel.querySelector("[data-qpayd-qr]").src = client.resolveUrl(payment.qr_svg_url);
   setPaymentValue(panel.querySelector("[data-qpayd-value]"), payment[valueKey]);
-  panel.querySelector("[data-qpayd-uri]").href = payment.uri;
+  setWalletHref(panel.querySelector("[data-qpayd-uri]"), payment.uri);
 }
 
 function setMethod(root, method) {
+  const selectedTab = root.querySelector(`[data-qpayd-method="${method}"]`);
+  const selectedPanel = root.querySelector(`[data-qpayd-panel="${method}"]`);
+  if (!selectedTab || !selectedPanel || selectedTab.hidden || selectedPanel.hidden) return false;
+
   root.querySelectorAll("[data-qpayd-method]").forEach((button) => {
     button.setAttribute("aria-selected", String(button.getAttribute("data-qpayd-method") === method));
   });
   root.querySelectorAll("[data-qpayd-panel]").forEach((panel) => {
     panel.hidden = panel.getAttribute("data-qpayd-panel") !== method;
   });
+  return true;
+}
+
+function preferredPaymentMethod(invoice) {
+  const saved = loadPreferredPaymentMethod();
+  return paymentMethodAvailable(invoice, saved) ? saved : defaultPaymentMethod(invoice);
+}
+
+function defaultPaymentMethod(invoice) {
+  return invoice.lightning ? "lightning" : "bitcoin";
+}
+
+function paymentMethodAvailable(invoice, method) {
+  return (method === "lightning" && Boolean(invoice.lightning)) || (method === "bitcoin" && Boolean(invoice.bitcoin));
+}
+
+function loadPreferredPaymentMethod() {
+  try {
+    const method = globalThis.localStorage?.getItem(PAYMENT_METHOD_STORAGE_KEY);
+    return method === "bitcoin" || method === "lightning" ? method : "";
+  } catch {
+    return "";
+  }
+}
+
+function savePreferredPaymentMethod(method) {
+  try {
+    globalThis.localStorage?.setItem(PAYMENT_METHOD_STORAGE_KEY, method);
+  } catch {
+    // Preference storage is optional.
+  }
 }
 
 function modalHtml(invoice) {
@@ -239,12 +288,12 @@ function modalHtml(invoice) {
       <header class="qpayd-head">
         <div>
           <strong>Pay with Bitcoin</strong>
-          <span data-qpayd-fiat>${invoice.amount} ${invoice.currency}</span>
+          <span data-qpayd-fiat>${escapeHtml(invoice.amount)} ${escapeHtml(invoice.currency)}</span>
         </div>
         <button type="button" data-qpayd-close aria-label="Close">x</button>
       </header>
       <div class="qpayd-summary">
-        <span data-qpayd-status data-status="${invoice.status}">${statusLabel(invoice.status)}</span>
+        <span data-qpayd-status data-status="${escapeHtml(invoice.status)}">${escapeHtml(statusLabel(invoice.status))}</span>
         <span data-qpayd-sats>${invoice.btc_amount_sats.toLocaleString()} sats</span>
         <span data-qpayd-expiry>${formatExpiry(invoice.expires_at)}</span>
       </div>
@@ -307,6 +356,17 @@ function setPaymentValue(element, value) {
   element.dataset.qpaydExpanded = "false";
   element.textContent = abbreviate(value);
   element.title = value.length > ABBREVIATE_AT ? "Click to show full value" : "";
+}
+
+function setWalletHref(element, uri) {
+  const value = String(uri ?? "");
+  if (/^(bitcoin|lightning):/i.test(value)) {
+    element.href = value;
+    element.removeAttribute("aria-disabled");
+  } else {
+    element.removeAttribute("href");
+    element.setAttribute("aria-disabled", "true");
+  }
 }
 
 function toggleValue(element) {

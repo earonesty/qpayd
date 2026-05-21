@@ -20,6 +20,8 @@ pub struct Invoice {
     pub lightning_bolt11: Option<String>,
     pub lightning_payment_hash: Option<String>,
     pub idempotency_key: Option<String>,
+    #[serde(skip)]
+    pub payment_link_id: Option<String>,
     pub rate_source: String,
     pub rate: Decimal,
     pub metadata: serde_json::Value,

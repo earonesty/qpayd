@@ -218,11 +218,14 @@ async fn create_invoice(
     let invoice = build_invoice(
         &state,
         store_cfg,
-        store_id,
-        request.amount,
-        request.currency,
-        request.metadata.unwrap_or_else(|| serde_json::json!({})),
-        idempotency_key,
+        BuildInvoiceInput {
+            store_id,
+            amount: request.amount,
+            currency: request.currency,
+            metadata: request.metadata.unwrap_or_else(|| serde_json::json!({})),
+            idempotency_key,
+            payment_link_id: None,
+        },
     )
     .await?;
 
@@ -310,7 +313,7 @@ async fn create_public_payment_link_invoice(
     if let Some(key) = &idempotency_key
         && let Some(invoice) = state
             .store
-            .invoice_by_idempotency_key(&store_id, key)
+            .invoice_by_payment_link_idempotency_key(&store_id, &payment_link_id, key)
             .await?
     {
         return json_public_response(
@@ -322,11 +325,14 @@ async fn create_public_payment_link_invoice(
     let invoice = build_invoice(
         &state,
         store_cfg,
-        store_id,
-        payment_link.amount,
-        payment_link.currency.clone(),
-        payment_link.metadata.clone(),
-        idempotency_key,
+        BuildInvoiceInput {
+            store_id,
+            amount: payment_link.amount,
+            currency: payment_link.currency.clone(),
+            metadata: payment_link.metadata.clone(),
+            idempotency_key,
+            payment_link_id: Some(payment_link_id),
+        },
     )
     .await?;
 
@@ -365,21 +371,26 @@ async fn public_invoice_preflight(
     Ok(preflight_response(cors))
 }
 
-async fn build_invoice(
-    state: &AppState,
-    store_cfg: &crate::config::StoreConfig,
+struct BuildInvoiceInput {
     store_id: String,
     amount: Decimal,
     currency: String,
     metadata: serde_json::Value,
     idempotency_key: Option<String>,
+    payment_link_id: Option<String>,
+}
+
+async fn build_invoice(
+    state: &AppState,
+    store_cfg: &crate::config::StoreConfig,
+    input: BuildInvoiceInput,
 ) -> Result<Invoice, ApiError> {
-    let currency = currency.to_uppercase();
+    let currency = input.currency.to_uppercase();
     let rate = state.pricing.btc_rate(&currency).await?;
-    let btc_amount_sats = sats_for(amount, rate.value)?;
+    let btc_amount_sats = sats_for(input.amount, rate.value)?;
     let (onchain_address, onchain_address_index, onchain_script_pubkey) = match &store_cfg.onchain {
         Some(onchain) => {
-            let index = state.store.reserve_address_index(&store_id).await?;
+            let index = state.store.reserve_address_index(&input.store_id).await?;
             let descriptor = onchain
                 .descriptor()?
                 .parse::<Descriptor<DescriptorPublicKey>>()
@@ -418,9 +429,9 @@ async fn build_invoice(
     let id = Uuid::new_v4();
     let invoice = Invoice {
         id,
-        store_id,
+        store_id: input.store_id,
         status: InvoiceStatus::New,
-        amount,
+        amount: input.amount,
         currency,
         btc_amount_sats,
         paid_sats: 0,
@@ -433,10 +444,11 @@ async fn build_invoice(
             .as_ref()
             .map(|invoice| invoice.bolt11.clone()),
         lightning_payment_hash: lightning_invoice.and_then(|invoice| invoice.payment_hash),
-        idempotency_key,
+        idempotency_key: input.idempotency_key,
+        payment_link_id: input.payment_link_id,
         rate_source: rate.source,
         rate: rate.value,
-        metadata,
+        metadata: input.metadata,
         expires_at: now + Duration::minutes(store_cfg.expiry_minutes() as i64),
         created_at: now,
         updated_at: now,
@@ -448,13 +460,28 @@ async fn build_invoice(
         .insert_invoice(&invoice, &event, store_cfg.webhook_url.as_deref())
         .await
     {
-        if let Some(key) = &invoice.idempotency_key
-            && let Some(existing) = state
-                .store
-                .invoice_by_idempotency_key(&invoice.store_id, key)
-                .await?
-        {
-            return Ok(existing);
+        if let Some(key) = &invoice.idempotency_key {
+            let existing = match &invoice.payment_link_id {
+                Some(payment_link_id) => {
+                    state
+                        .store
+                        .invoice_by_payment_link_idempotency_key(
+                            &invoice.store_id,
+                            payment_link_id,
+                            key,
+                        )
+                        .await?
+                }
+                None => {
+                    state
+                        .store
+                        .invoice_by_idempotency_key(&invoice.store_id, key)
+                        .await?
+                }
+            };
+            if let Some(existing) = existing {
+                return Ok(existing);
+            }
         }
         return Err(error.into());
     }
@@ -1529,9 +1556,10 @@ impl ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
+        tracing::error!(error = ?error, "internal API error");
         Self {
-            status: StatusCode::BAD_REQUEST,
-            message: error.to_string(),
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "internal server error".to_string(),
         }
     }
 }
@@ -2071,6 +2099,70 @@ mod tests {
 
         assert_eq!(second["id"], first["id"]);
         assert_eq!(second["bitcoin"]["address"], first["bitcoin"]["address"]);
+    }
+
+    #[tokio::test]
+    async fn public_payment_link_does_not_reuse_admin_idempotency_key() {
+        // SAFETY: this test uses a single fixed value and does not depend on
+        // concurrent mutation of the same environment variable.
+        unsafe {
+            std::env::set_var("QPAYD_MAIN_API_TOKEN", "test-token");
+        }
+        let app = test_app().await;
+
+        let admin = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/stores/main/invoices")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("Idempotency-Key", "shared-order-1")
+                    .body(Body::from(r#"{"amount":"10.00","currency":"USD"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(admin.status(), StatusCode::OK);
+        let admin: serde_json::Value =
+            serde_json::from_slice(&to_bytes(admin.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+
+        let public = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/public/stores/main/payment-links/donate-10/invoices")
+                    .header("Idempotency-Key", "shared-order-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(public.status(), StatusCode::OK);
+        let public: serde_json::Value =
+            serde_json::from_slice(&to_bytes(public.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_ne!(public["id"], admin["id"]);
+
+        let replay = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/public/stores/main/payment-links/donate-10/invoices")
+                    .header("Idempotency-Key", "shared-order-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay: serde_json::Value =
+            serde_json::from_slice(&to_bytes(replay.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(replay["id"], public["id"]);
     }
 
     #[tokio::test]

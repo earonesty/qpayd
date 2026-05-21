@@ -31,7 +31,7 @@ pub async fn deliver(
     let timestamp = chrono::Utc::now().timestamp();
     let signature = sign(secret, timestamp, body);
 
-    reqwest::Client::new()
+    crate::http::no_redirect_client()
         .post(url)
         .header("content-type", "application/json")
         .header("qpayd-event-id", event_id)

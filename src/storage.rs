@@ -45,6 +45,12 @@ pub trait Store: Send + Sync {
         store_id: &str,
         idempotency_key: &str,
     ) -> anyhow::Result<Option<Invoice>>;
+    async fn invoice_by_payment_link_idempotency_key(
+        &self,
+        store_id: &str,
+        payment_link_id: &str,
+        idempotency_key: &str,
+    ) -> anyhow::Result<Option<Invoice>>;
     async fn active_onchain_invoices(&self, store_id: &str) -> anyhow::Result<Vec<Invoice>>;
     async fn active_lightning_invoices(&self, store_id: &str) -> anyhow::Result<Vec<Invoice>>;
     async fn expirable_invoices(
@@ -218,9 +224,9 @@ impl Store for SqliteStore {
                 id, store_id, status, amount, currency, btc_amount_sats,
                 paid_sats, confirmed_sats, unconfirmed_sats,
                 onchain_address, onchain_address_index, onchain_script_pubkey,
-                lightning_bolt11, lightning_payment_hash, idempotency_key, rate_source, rate,
+                lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, rate_source, rate,
                 metadata, expires_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(invoice.id.to_string())
@@ -238,6 +244,7 @@ impl Store for SqliteStore {
         .bind(&invoice.lightning_bolt11)
         .bind(&invoice.lightning_payment_hash)
         .bind(&invoice.idempotency_key)
+        .bind(&invoice.payment_link_id)
         .bind(&invoice.rate_source)
         .bind(invoice.rate.to_string())
         .bind(invoice.metadata.to_string())
@@ -264,7 +271,7 @@ impl Store for SqliteStore {
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, metadata,
                    expires_at, created_at, updated_at
             FROM invoices
             WHERE store_id = ? AND id = ?
@@ -293,7 +300,7 @@ impl Store for SqliteStore {
                 SELECT id, store_id, status, amount, currency, btc_amount_sats,
                        paid_sats, confirmed_sats, unconfirmed_sats,
                        onchain_address, onchain_address_index, onchain_script_pubkey,
-                       rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                       rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, metadata,
                        expires_at, created_at, updated_at
                 FROM invoices
                 WHERE store_id = ? AND status = ?
@@ -312,7 +319,7 @@ impl Store for SqliteStore {
                 SELECT id, store_id, status, amount, currency, btc_amount_sats,
                        paid_sats, confirmed_sats, unconfirmed_sats,
                        onchain_address, onchain_address_index, onchain_script_pubkey,
-                       rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                       rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, metadata,
                        expires_at, created_at, updated_at
                 FROM invoices
                 WHERE store_id = ?
@@ -339,13 +346,42 @@ impl Store for SqliteStore {
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, metadata,
                    expires_at, created_at, updated_at
             FROM invoices
-            WHERE store_id = ? AND idempotency_key = ?
+            WHERE store_id = ? AND idempotency_key = ? AND payment_link_id IS NULL
             "#,
         )
         .bind(store_id)
+        .bind(idempotency_key)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(invoice_from_row(row)?))
+    }
+
+    async fn invoice_by_payment_link_idempotency_key(
+        &self,
+        store_id: &str,
+        payment_link_id: &str,
+        idempotency_key: &str,
+    ) -> anyhow::Result<Option<Invoice>> {
+        let Some(row) = sqlx::query(
+            r#"
+            SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                   paid_sats, confirmed_sats, unconfirmed_sats,
+                   onchain_address, onchain_address_index, onchain_script_pubkey,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, metadata,
+                   expires_at, created_at, updated_at
+            FROM invoices
+            WHERE store_id = ? AND payment_link_id = ? AND idempotency_key = ?
+            "#,
+        )
+        .bind(store_id)
+        .bind(payment_link_id)
         .bind(idempotency_key)
         .fetch_optional(&self.pool)
         .await?
@@ -362,7 +398,7 @@ impl Store for SqliteStore {
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, metadata,
                    expires_at, created_at, updated_at
             FROM invoices
             WHERE store_id = ?
@@ -383,7 +419,7 @@ impl Store for SqliteStore {
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, metadata,
                    expires_at, created_at, updated_at
             FROM invoices
             WHERE store_id = ?
@@ -408,7 +444,7 @@ impl Store for SqliteStore {
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, metadata,
                    expires_at, created_at, updated_at
             FROM invoices
             WHERE store_id = ?
@@ -860,9 +896,9 @@ impl Store for PostgresStore {
                 id, store_id, status, amount, currency, btc_amount_sats,
                 paid_sats, confirmed_sats, unconfirmed_sats,
                 onchain_address, onchain_address_index, onchain_script_pubkey,
-                lightning_bolt11, lightning_payment_hash, idempotency_key, rate_source, rate,
+                lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, rate_source, rate,
                 metadata, expires_at, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
             "#,
         )
         .bind(invoice.id.to_string())
@@ -880,6 +916,7 @@ impl Store for PostgresStore {
         .bind(&invoice.lightning_bolt11)
         .bind(&invoice.lightning_payment_hash)
         .bind(&invoice.idempotency_key)
+        .bind(&invoice.payment_link_id)
         .bind(&invoice.rate_source)
         .bind(invoice.rate.to_string())
         .bind(invoice.metadata.to_string())
@@ -906,7 +943,7 @@ impl Store for PostgresStore {
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, metadata,
                    expires_at, created_at, updated_at
             FROM qpayd_invoices
             WHERE store_id = $1 AND id = $2
@@ -935,7 +972,7 @@ impl Store for PostgresStore {
                 SELECT id, store_id, status, amount, currency, btc_amount_sats,
                        paid_sats, confirmed_sats, unconfirmed_sats,
                        onchain_address, onchain_address_index, onchain_script_pubkey,
-                       rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                       rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, metadata,
                        expires_at, created_at, updated_at
                 FROM qpayd_invoices
                 WHERE store_id = $1 AND status = $2
@@ -954,7 +991,7 @@ impl Store for PostgresStore {
                 SELECT id, store_id, status, amount, currency, btc_amount_sats,
                        paid_sats, confirmed_sats, unconfirmed_sats,
                        onchain_address, onchain_address_index, onchain_script_pubkey,
-                       rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                       rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, metadata,
                        expires_at, created_at, updated_at
                 FROM qpayd_invoices
                 WHERE store_id = $1
@@ -981,13 +1018,42 @@ impl Store for PostgresStore {
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, metadata,
                    expires_at, created_at, updated_at
             FROM qpayd_invoices
-            WHERE store_id = $1 AND idempotency_key = $2
+            WHERE store_id = $1 AND idempotency_key = $2 AND payment_link_id IS NULL
             "#,
         )
         .bind(store_id)
+        .bind(idempotency_key)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(invoice_from_pg_row(row)?))
+    }
+
+    async fn invoice_by_payment_link_idempotency_key(
+        &self,
+        store_id: &str,
+        payment_link_id: &str,
+        idempotency_key: &str,
+    ) -> anyhow::Result<Option<Invoice>> {
+        let Some(row) = sqlx::query(
+            r#"
+            SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                   paid_sats, confirmed_sats, unconfirmed_sats,
+                   onchain_address, onchain_address_index, onchain_script_pubkey,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, metadata,
+                   expires_at, created_at, updated_at
+            FROM qpayd_invoices
+            WHERE store_id = $1 AND payment_link_id = $2 AND idempotency_key = $3
+            "#,
+        )
+        .bind(store_id)
+        .bind(payment_link_id)
         .bind(idempotency_key)
         .fetch_optional(&self.pool)
         .await?
@@ -1004,7 +1070,7 @@ impl Store for PostgresStore {
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, metadata,
                    expires_at, created_at, updated_at
             FROM qpayd_invoices
             WHERE store_id = $1
@@ -1025,7 +1091,7 @@ impl Store for PostgresStore {
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, metadata,
                    expires_at, created_at, updated_at
             FROM qpayd_invoices
             WHERE store_id = $1
@@ -1050,7 +1116,7 @@ impl Store for PostgresStore {
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, payment_link_id, metadata,
                    expires_at, created_at, updated_at
             FROM qpayd_invoices
             WHERE store_id = $1
@@ -1595,6 +1661,28 @@ const SQLITE_MIGRATIONS: &[Migration] = &[
         "#,
         ],
     },
+    Migration {
+        version: 5,
+        name: "invoice_payment_link_idempotency_scope",
+        statements: &[
+            r#"
+        ALTER TABLE invoices ADD COLUMN payment_link_id TEXT
+        "#,
+            r#"
+        DROP INDEX IF EXISTS invoices_store_idempotency_key_idx
+        "#,
+            r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS invoices_store_admin_idempotency_key_idx
+        ON invoices (store_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL AND payment_link_id IS NULL
+            "#,
+            r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS invoices_store_payment_link_idempotency_key_idx
+        ON invoices (store_id, payment_link_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL AND payment_link_id IS NOT NULL
+            "#,
+        ],
+    },
 ];
 
 const POSTGRES_MIGRATIONS: &[Migration] = &[
@@ -1740,6 +1828,28 @@ const POSTGRES_MIGRATIONS: &[Migration] = &[
         CREATE INDEX IF NOT EXISTS qpayd_lightning_sweeps_store_created_idx
         ON qpayd_lightning_sweeps (store_id, created_at)
         "#,
+        ],
+    },
+    Migration {
+        version: 5,
+        name: "invoice_payment_link_idempotency_scope",
+        statements: &[
+            r#"
+        ALTER TABLE qpayd_invoices ADD COLUMN payment_link_id TEXT
+        "#,
+            r#"
+        DROP INDEX IF EXISTS qpayd_invoices_store_idempotency_key_idx
+        "#,
+            r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS qpayd_invoices_store_admin_idempotency_key_idx
+        ON qpayd_invoices (store_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL AND payment_link_id IS NULL
+            "#,
+            r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS qpayd_invoices_store_payment_link_idempotency_key_idx
+        ON qpayd_invoices (store_id, payment_link_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL AND payment_link_id IS NOT NULL
+            "#,
         ],
     },
 ];
@@ -1938,6 +2048,7 @@ fn invoice_from_row(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<Invoice> {
         lightning_bolt11: row.get("lightning_bolt11"),
         lightning_payment_hash: row.get("lightning_payment_hash"),
         idempotency_key: row.get("idempotency_key"),
+        payment_link_id: row.get("payment_link_id"),
         rate_source: row.get("rate_source"),
         rate: row.get::<String, _>("rate").parse::<Decimal>()?,
         metadata: serde_json::from_str(row.get::<String, _>("metadata").as_str())?,
@@ -1969,6 +2080,7 @@ fn invoice_from_pg_row(row: sqlx::postgres::PgRow) -> anyhow::Result<Invoice> {
         lightning_bolt11: row.get("lightning_bolt11"),
         lightning_payment_hash: row.get("lightning_payment_hash"),
         idempotency_key: row.get("idempotency_key"),
+        payment_link_id: row.get("payment_link_id"),
         rate_source: row.get("rate_source"),
         rate: row.get::<String, _>("rate").parse::<Decimal>()?,
         metadata: serde_json::from_str(row.get::<String, _>("metadata").as_str())?,
@@ -2188,6 +2300,12 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn payment_link_idempotency_keys_are_scoped() {
+        let store = test_store().await;
+        payment_link_idempotency_keys_are_scoped_for(store.as_ref()).await;
+    }
+
+    #[tokio::test]
     async fn expirable_invoices_include_only_unpaid_due_invoices() {
         let store = test_store().await;
         expirable_invoices_include_only_unpaid_due_invoices_for(store.as_ref()).await;
@@ -2225,7 +2343,7 @@ mod tests {
             .fetch_all(&store.pool)
             .await
             .unwrap();
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), 5);
         assert_eq!(rows[0].get::<i64, _>("version"), 1);
         assert_eq!(rows[0].get::<String, _>("name"), "initial_schema");
         assert_eq!(rows[1].get::<i64, _>("version"), 2);
@@ -2234,6 +2352,11 @@ mod tests {
         assert_eq!(rows[2].get::<String, _>("name"), "invoice_payment_amounts");
         assert_eq!(rows[3].get::<i64, _>("version"), 4);
         assert_eq!(rows[3].get::<String, _>("name"), "merchant_admin_records");
+        assert_eq!(rows[4].get::<i64, _>("version"), 5);
+        assert_eq!(
+            rows[4].get::<String, _>("name"),
+            "invoice_payment_link_idempotency_scope"
+        );
     }
 
     #[tokio::test]
@@ -2247,7 +2370,7 @@ mod tests {
                 .fetch_all(&store.pool)
                 .await
                 .unwrap();
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), 5);
         assert_eq!(rows[0].get::<i64, _>("version"), 1);
         assert_eq!(rows[0].get::<String, _>("name"), "initial_schema");
         assert_eq!(rows[1].get::<i64, _>("version"), 2);
@@ -2256,6 +2379,11 @@ mod tests {
         assert_eq!(rows[2].get::<String, _>("name"), "invoice_payment_amounts");
         assert_eq!(rows[3].get::<i64, _>("version"), 4);
         assert_eq!(rows[3].get::<String, _>("name"), "merchant_admin_records");
+        assert_eq!(rows[4].get::<i64, _>("version"), 5);
+        assert_eq!(
+            rows[4].get::<String, _>("name"),
+            "invoice_payment_link_idempotency_scope"
+        );
 
         clean_pg_store(&store).await;
         insert_invoice_persists_event_and_webhook_delivery_for(&store).await;
@@ -2268,6 +2396,9 @@ mod tests {
 
         clean_pg_store(&store).await;
         idempotency_key_finds_original_invoice_for(&store).await;
+
+        clean_pg_store(&store).await;
+        payment_link_idempotency_keys_are_scoped_for(&store).await;
 
         clean_pg_store(&store).await;
         expirable_invoices_include_only_unpaid_due_invoices_for(&store).await;
@@ -2395,6 +2526,53 @@ mod tests {
         assert_eq!(found.id, invoice.id);
         assert_eq!(found.onchain_address_index, invoice.onchain_address_index);
         assert_eq!(found.idempotency_key.as_deref(), Some("retry-key-1"));
+    }
+
+    async fn payment_link_idempotency_keys_are_scoped_for(store: &dyn Store) {
+        let mut admin_invoice = test_invoice(InvoiceStatus::New);
+        admin_invoice.idempotency_key = Some("shared-key".to_string());
+        let admin_event = invoice_created_event(&admin_invoice, admin_invoice.created_at);
+        store
+            .insert_invoice(&admin_invoice, &admin_event, None)
+            .await
+            .unwrap();
+
+        let mut link_invoice = test_invoice(InvoiceStatus::New);
+        link_invoice.idempotency_key = Some("shared-key".to_string());
+        link_invoice.payment_link_id = Some("donate-10".to_string());
+        let link_event = invoice_created_event(&link_invoice, link_invoice.created_at);
+        store
+            .insert_invoice(&link_invoice, &link_event, None)
+            .await
+            .unwrap();
+
+        let found_admin = store
+            .invoice_by_idempotency_key(&admin_invoice.store_id, "shared-key")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found_admin.id, admin_invoice.id);
+
+        let found_link = store
+            .invoice_by_payment_link_idempotency_key(
+                &link_invoice.store_id,
+                "donate-10",
+                "shared-key",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found_link.id, link_invoice.id);
+
+        let wrong_link = store
+            .invoice_by_payment_link_idempotency_key(
+                &link_invoice.store_id,
+                "other-link",
+                "shared-key",
+            )
+            .await
+            .unwrap();
+        assert!(wrong_link.is_none());
     }
 
     async fn expirable_invoices_include_only_unpaid_due_invoices_for(store: &dyn Store) {
@@ -2636,6 +2814,7 @@ mod tests {
             lightning_bolt11: None,
             lightning_payment_hash: None,
             idempotency_key: None,
+            payment_link_id: None,
             rate_source: "kraken".to_string(),
             rate: Decimal::from(100_000),
             metadata: serde_json::json!({ "order_id": "ord_123" }),
