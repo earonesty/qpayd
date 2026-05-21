@@ -61,9 +61,9 @@ curl -sS -X POST https://pay.example.com/v1/stores/main/refunds/$REFUND_ID/cance
 ```
 
 Pending and finalized refunds count against the invoice refundable balance.
-Canceled and failed refunds do not. Refund responses include optional
-`destination_type`, `idempotency_key`, `payment_proof`, and `failure_reason`
-fields.
+Canceled and failed refunds do not. Refund responses include `approval_status`
+plus optional `destination_type`, `idempotency_key`, `payment_proof`, and
+`failure_reason` fields.
 
 Use a scoped payout token globally, or override it per store:
 
@@ -79,6 +79,25 @@ payout_token_env = "QPAYD_MAIN_PAYOUT_TOKEN"
 If `payout_token_env` is configured, refund create, finalize, fail, and cancel
 requests must use that token. If it is omitted, refund mutations use
 `admin_token_env` when configured, otherwise `api_token_env`.
+
+Approve a refund that crosses `manual_approval_threshold_sats`:
+
+```sh
+curl -sS -X POST https://pay.example.com/v1/stores/main/refunds/$REFUND_ID/approve \
+  -H "Authorization: Bearer $QPAYD_MAIN_ADMIN_TOKEN"
+```
+
+Approved refunds can then be finalized or executed with the payout token.
+
+Verify the approval path with a small amount first:
+
+```sh
+curl -sS https://pay.example.com/v1/stores/main/refunds/$REFUND_ID \
+  -H "Authorization: Bearer $QPAYD_MAIN_ADMIN_TOKEN"
+```
+
+Confirm the response shows `"approval_status":"approved"`, then finalize or run
+the refund executor and confirm the refund reaches `"status":"succeeded"`.
 
 ## Refund Execution Config
 
