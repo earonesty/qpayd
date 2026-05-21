@@ -13,8 +13,9 @@ const adminVersion = (process.env.ADMIN_VERSION ?? qpaydVersion).replace(/^v/, "
 const assetSource =
   process.env.ADMIN_ASSET_SOURCE ??
   `https://cdn.jsdelivr.net/npm/@qpayd/admin@${adminVersion}/src/index.js`;
+const assetIntegritySource = process.env.ADMIN_ASSET_INTEGRITY_SOURCE ?? assetSource;
 
-const assetBytes = await fetchAsset(assetSource);
+const assetBytes = await readAsset(assetIntegritySource);
 const integrityValue = createHash("sha384").update(assetBytes).digest("base64");
 const integrity = `sha384-${integrityValue}`;
 
@@ -32,10 +33,16 @@ await fs.mkdir(outDir, { recursive: true });
 await fs.writeFile(path.join(outDir, "admin-portal.md"), markdown);
 await fs.writeFile(path.join(outDir, "admin-portal.html"), await renderHtml(markdown, parsed.data));
 
-async function fetchAsset(url) {
-  const response = await fetch(url);
+async function readAsset(source) {
+  if (/^https?:\/\//.test(source)) return fetchAsset(source);
+  if (source.startsWith("file://")) return fs.readFile(new URL(source));
+  return fs.readFile(path.isAbsolute(source) ? source : path.resolve(root, source));
+}
+
+async function fetchAsset(source) {
+  const response = await fetch(source);
   if (!response.ok) {
-    throw new Error(`failed to fetch admin asset ${url}: ${response.status}`);
+    throw new Error(`failed to fetch admin asset ${source}: ${response.status}`);
   }
   return Buffer.from(await response.arrayBuffer());
 }

@@ -58,8 +58,14 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
+          admin_version="${tag#v}"
+          admin_asset_source="https://cdn.jsdelivr.net/npm/@qpayd/admin@${admin_version}/src/index.js"
           SITE_OUT_DIR="$PWD/public" npm --prefix site run build
-          OUT_DIR="$PWD/dist" QPAYD_VERSION="${tag}" npm --prefix site run render-admin-portal
+          OUT_DIR="$PWD/dist" \
+            QPAYD_VERSION="${tag}" \
+            ADMIN_ASSET_SOURCE="${admin_asset_source}" \
+            ADMIN_ASSET_INTEGRITY_SOURCE="$PWD/js/packages/admin/src/index.js" \
+            npm --prefix site run render-admin-portal
 
       - name: Create GitHub release
         env:
