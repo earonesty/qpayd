@@ -11,19 +11,23 @@ queue. Invoice creation does not depend on the receiver being online.
 
 ## Configure the webhook secret
 
-Generate a secret:
+Each store has its own webhook secret. qpayd reads it from an environment
+variable named by `webhook_secret_env`; it does not put the secret directly in
+the TOML file.
+
+Generate a strong secret:
 
 ```sh
 qpayd generate-secret
 ```
 
-Set it in the qpayd environment:
+Set that value in the qpayd environment:
 
 ```sh
 export QPAYD_MAIN_WEBHOOK_SECRET="paste-generated-secret"
 ```
 
-Configure the store:
+Point the store at that environment variable:
 
 ```toml
 [[stores]]
@@ -45,6 +49,10 @@ QPAYD_MAIN_WEBHOOK_SECRET=paste-generated-secret
 ```
 
 Use a different webhook secret for each store.
+
+Use the same secret in the webhook receiver when verifying
+`qpayd-signature`. Rotate it by generating a new value, updating the qpayd
+environment, updating the receiver, and restarting qpayd.
 
 ## Events
 
@@ -68,8 +76,9 @@ Webhook requests are signed with:
 - `qpayd-event-type`
 - `qpayd-signature`
 
-The signature is HMAC-SHA256 over the raw request body using the store webhook
-secret. Verify it before fulfillment.
+`qpayd-signature` has the form `t=<unix timestamp>,v1=<hex hmac>`. The HMAC is
+SHA256 over `<timestamp>.<raw request body>` using the store webhook secret.
+Verify it before fulfillment, then use the event id as your idempotency key.
 
 ## Replay
 

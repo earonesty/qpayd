@@ -354,7 +354,15 @@ async fn deliver_due_webhooks(config: &Config, store: Arc<dyn Store>) -> anyhow:
         };
         let secret = std::env::var(secret_env)?;
         let body = serde_json::to_vec(&delivery.event)?;
-        match webhook::deliver(&delivery.url, &secret, &body).await {
+        match webhook::deliver(
+            &delivery.url,
+            &secret,
+            &delivery.event.id,
+            &delivery.event.event_type,
+            &body,
+        )
+        .await
+        {
             Ok(()) => {
                 store
                     .mark_webhook_delivered(delivery.id, chrono::Utc::now())
