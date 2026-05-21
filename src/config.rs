@@ -600,7 +600,8 @@ fn validate_script_integrity(integrity: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, HotWalletBackend, HotWalletConfig, validate_hot_wallet_refunds};
+    use crate::invoice::RefundDestinationType;
 
     #[test]
     fn validates_public_payment_links() {
@@ -908,6 +909,61 @@ mod tests {
     }
 
     #[test]
+    fn rejects_zero_hot_wallet_max_refund_sats() {
+        let mut hot_wallet = valid_hot_wallet_refund_config();
+        hot_wallet.max_refund_sats = 0;
+
+        let error = validate_hot_wallet_refunds("main", &hot_wallet)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("max_refund_sats"));
+    }
+
+    #[test]
+    fn rejects_zero_hot_wallet_daily_refund_limit_sats() {
+        let mut hot_wallet = valid_hot_wallet_refund_config();
+        hot_wallet.daily_refund_limit_sats = 0;
+
+        let error = validate_hot_wallet_refunds("main", &hot_wallet)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("daily_refund_limit_sats"));
+    }
+
+    #[test]
+    fn rejects_zero_hot_wallet_manual_approval_threshold_sats() {
+        let mut hot_wallet = valid_hot_wallet_refund_config();
+        hot_wallet.manual_approval_threshold_sats = Some(0);
+
+        let error = validate_hot_wallet_refunds("main", &hot_wallet)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("manual_approval_threshold_sats"));
+    }
+
+    #[test]
+    fn rejects_zero_hot_wallet_refund_poll_seconds() {
+        let mut hot_wallet = valid_hot_wallet_refund_config();
+        hot_wallet.refund_poll_seconds = 0;
+
+        let error = validate_hot_wallet_refunds("main", &hot_wallet)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("refund_poll_seconds"));
+    }
+
+    #[test]
+    fn rejects_empty_hot_wallet_allowed_refund_destination_types() {
+        let mut hot_wallet = valid_hot_wallet_refund_config();
+        hot_wallet.allowed_refund_destination_types.clear();
+
+        let error = validate_hot_wallet_refunds("main", &hot_wallet)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("allowed_refund_destination_types"));
+    }
+
+    #[test]
     fn rejects_shared_lightning_invoice_and_hot_wallet_secret_env() {
         let config: Config = toml::from_str(
             r#"
@@ -939,5 +995,23 @@ mod tests {
 
         let error = config.validate().unwrap_err().to_string();
         assert!(error.contains("full_api_password_env must be separate"));
+    }
+
+    fn valid_hot_wallet_refund_config() -> HotWalletConfig {
+        HotWalletConfig {
+            enabled: true,
+            refund_execution_enabled: true,
+            backend: HotWalletBackend::Barkd,
+            url: "http://127.0.0.1:3000".to_string(),
+            full_api_password_env: "BARKD_FULL_AUTH_TOKEN".to_string(),
+            refund_poll_seconds: 30,
+            max_refund_sats: 100_000,
+            daily_refund_limit_sats: 500_000,
+            manual_approval_threshold_sats: Some(250_000),
+            allowed_refund_destination_types: vec![
+                RefundDestinationType::LightningInvoice,
+                RefundDestinationType::Lnurl,
+            ],
+        }
     }
 }

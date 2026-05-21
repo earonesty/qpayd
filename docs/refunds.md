@@ -78,10 +78,10 @@ private server.
 ```toml
 [stores.hot_wallet]
 enabled = true
-refund_execution_enabled = true
-backend = "barkd"
-url = "http://127.0.0.1:3000"
-full_api_password_env = "BARKD_FULL_AUTH_TOKEN"
+refund_execution_enabled = false
+backend = "phoenixd" # or "barkd" / "bitcoind"
+url = "http://127.0.0.1:PORT"
+full_api_password_env = "QPAYD_HOT_WALLET_PASSWORD"
 max_refund_sats = 100000
 daily_refund_limit_sats = 500000
 manual_approval_threshold_sats = 250000
@@ -89,5 +89,6 @@ refund_poll_seconds = 30
 allowed_refund_destination_types = ["lightning_invoice", "lnurl"]
 ```
 
-The hot-wallet credential should be separate from the limited Lightning invoice
-credential used by the public receive service.
+Keep `refund_execution_enabled = false` until refund execution is released, and
+continue finalizing or failing refunds manually. Backend-specific wallet
+configuration is covered in [Lightning backends](./lightning-backends.md).
