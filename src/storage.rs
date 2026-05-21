@@ -24,6 +24,13 @@ pub struct InvoiceListFilter {
     pub limit: u32,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct RefundExecutionCandidate {
+    pub refund: Refund,
+    pub invoice: Invoice,
+}
+
 #[async_trait]
 pub trait Store: Send + Sync {
     async fn migrate(&self) -> anyhow::Result<()>;
@@ -118,6 +125,22 @@ pub trait Store: Send + Sync {
         store_id: &str,
         invoice_id: Uuid,
     ) -> anyhow::Result<Vec<Refund>>;
+    #[allow(dead_code)]
+    async fn pending_refund_executions(
+        &self,
+        store_id: &str,
+        limit: u32,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<RefundExecutionCandidate>>;
+    #[allow(dead_code)]
+    async fn claim_refund_execution(
+        &self,
+        store_id: &str,
+        refund_id: Uuid,
+        worker_id: &str,
+        lease_until: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Option<RefundExecutionCandidate>>;
     async fn update_refund_status(
         &self,
         refund: &Refund,
@@ -787,6 +810,123 @@ impl Store for SqliteStore {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(refund_from_row).collect()
+    }
+
+    async fn pending_refund_executions(
+        &self,
+        store_id: &str,
+        limit: u32,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<RefundExecutionCandidate>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                r.id AS refund_id, r.store_id AS refund_store_id, r.invoice_id AS refund_invoice_id,
+                r.status AS refund_status, r.amount_sats AS refund_amount_sats,
+                r.destination AS refund_destination, r.destination_type AS refund_destination_type,
+                r.reason AS refund_reason, r.tx_id AS refund_tx_id, r.payment_proof AS refund_payment_proof,
+                r.failure_reason AS refund_failure_reason, r.idempotency_key AS refund_idempotency_key,
+                r.metadata AS refund_metadata, r.created_at AS refund_created_at,
+                r.updated_at AS refund_updated_at, r.finalized_at AS refund_finalized_at,
+                i.id AS invoice_id, i.store_id AS invoice_store_id, i.status AS invoice_status,
+                i.amount AS invoice_amount, i.currency AS invoice_currency,
+                i.btc_amount_sats AS invoice_btc_amount_sats, i.paid_sats AS invoice_paid_sats,
+                i.confirmed_sats AS invoice_confirmed_sats, i.unconfirmed_sats AS invoice_unconfirmed_sats,
+                i.onchain_address AS invoice_onchain_address, i.onchain_address_index AS invoice_onchain_address_index,
+                i.onchain_script_pubkey AS invoice_onchain_script_pubkey,
+                i.lightning_bolt11 AS invoice_lightning_bolt11,
+                i.lightning_payment_hash AS invoice_lightning_payment_hash,
+                i.idempotency_key AS invoice_idempotency_key, i.payment_link_id AS invoice_payment_link_id,
+                i.rate_source AS invoice_rate_source, i.rate AS invoice_rate, i.metadata AS invoice_metadata,
+                i.expires_at AS invoice_expires_at, i.created_at AS invoice_created_at,
+                i.updated_at AS invoice_updated_at
+            FROM refunds r
+            JOIN invoices i ON i.store_id = r.store_id AND i.id = r.invoice_id
+            WHERE r.store_id = ?
+              AND r.status = 'pending'
+              AND r.destination IS NOT NULL
+              AND (r.execution_lease_until IS NULL OR r.execution_lease_until <= ?)
+            ORDER BY r.created_at ASC
+            LIMIT ?
+            "#,
+        )
+        .bind(store_id)
+        .bind(now.to_rfc3339())
+        .bind(i64::from(limit.clamp(1, 200)))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(refund_execution_candidate_from_row)
+            .collect()
+    }
+
+    async fn claim_refund_execution(
+        &self,
+        store_id: &str,
+        refund_id: Uuid,
+        worker_id: &str,
+        lease_until: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Option<RefundExecutionCandidate>> {
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query(
+            r#"
+            UPDATE refunds
+            SET execution_claimed_by = ?,
+                execution_lease_until = ?,
+                updated_at = ?
+            WHERE store_id = ?
+              AND id = ?
+              AND status = 'pending'
+              AND destination IS NOT NULL
+              AND (execution_lease_until IS NULL OR execution_lease_until <= ?)
+            "#,
+        )
+        .bind(worker_id)
+        .bind(lease_until.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(store_id)
+        .bind(refund_id.to_string())
+        .bind(now.to_rfc3339())
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() == 0 {
+            tx.commit().await?;
+            return Ok(None);
+        }
+        let row = sqlx::query(
+            r#"
+            SELECT
+                r.id AS refund_id, r.store_id AS refund_store_id, r.invoice_id AS refund_invoice_id,
+                r.status AS refund_status, r.amount_sats AS refund_amount_sats,
+                r.destination AS refund_destination, r.destination_type AS refund_destination_type,
+                r.reason AS refund_reason, r.tx_id AS refund_tx_id, r.payment_proof AS refund_payment_proof,
+                r.failure_reason AS refund_failure_reason, r.idempotency_key AS refund_idempotency_key,
+                r.metadata AS refund_metadata, r.created_at AS refund_created_at,
+                r.updated_at AS refund_updated_at, r.finalized_at AS refund_finalized_at,
+                i.id AS invoice_id, i.store_id AS invoice_store_id, i.status AS invoice_status,
+                i.amount AS invoice_amount, i.currency AS invoice_currency,
+                i.btc_amount_sats AS invoice_btc_amount_sats, i.paid_sats AS invoice_paid_sats,
+                i.confirmed_sats AS invoice_confirmed_sats, i.unconfirmed_sats AS invoice_unconfirmed_sats,
+                i.onchain_address AS invoice_onchain_address, i.onchain_address_index AS invoice_onchain_address_index,
+                i.onchain_script_pubkey AS invoice_onchain_script_pubkey,
+                i.lightning_bolt11 AS invoice_lightning_bolt11,
+                i.lightning_payment_hash AS invoice_lightning_payment_hash,
+                i.idempotency_key AS invoice_idempotency_key, i.payment_link_id AS invoice_payment_link_id,
+                i.rate_source AS invoice_rate_source, i.rate AS invoice_rate, i.metadata AS invoice_metadata,
+                i.expires_at AS invoice_expires_at, i.created_at AS invoice_created_at,
+                i.updated_at AS invoice_updated_at
+            FROM refunds r
+            JOIN invoices i ON i.store_id = r.store_id AND i.id = r.invoice_id
+            WHERE r.store_id = ? AND r.id = ?
+            "#,
+        )
+        .bind(store_id)
+        .bind(refund_id.to_string())
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(refund_execution_candidate_from_row(row)?))
     }
 
     async fn update_refund_status(
@@ -1490,6 +1630,123 @@ impl Store for PostgresStore {
         rows.into_iter().map(refund_from_pg_row).collect()
     }
 
+    async fn pending_refund_executions(
+        &self,
+        store_id: &str,
+        limit: u32,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<RefundExecutionCandidate>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                r.id AS refund_id, r.store_id AS refund_store_id, r.invoice_id AS refund_invoice_id,
+                r.status AS refund_status, r.amount_sats AS refund_amount_sats,
+                r.destination AS refund_destination, r.destination_type AS refund_destination_type,
+                r.reason AS refund_reason, r.tx_id AS refund_tx_id, r.payment_proof AS refund_payment_proof,
+                r.failure_reason AS refund_failure_reason, r.idempotency_key AS refund_idempotency_key,
+                r.metadata AS refund_metadata, r.created_at AS refund_created_at,
+                r.updated_at AS refund_updated_at, r.finalized_at AS refund_finalized_at,
+                i.id AS invoice_id, i.store_id AS invoice_store_id, i.status AS invoice_status,
+                i.amount AS invoice_amount, i.currency AS invoice_currency,
+                i.btc_amount_sats AS invoice_btc_amount_sats, i.paid_sats AS invoice_paid_sats,
+                i.confirmed_sats AS invoice_confirmed_sats, i.unconfirmed_sats AS invoice_unconfirmed_sats,
+                i.onchain_address AS invoice_onchain_address, i.onchain_address_index AS invoice_onchain_address_index,
+                i.onchain_script_pubkey AS invoice_onchain_script_pubkey,
+                i.lightning_bolt11 AS invoice_lightning_bolt11,
+                i.lightning_payment_hash AS invoice_lightning_payment_hash,
+                i.idempotency_key AS invoice_idempotency_key, i.payment_link_id AS invoice_payment_link_id,
+                i.rate_source AS invoice_rate_source, i.rate AS invoice_rate, i.metadata AS invoice_metadata,
+                i.expires_at AS invoice_expires_at, i.created_at AS invoice_created_at,
+                i.updated_at AS invoice_updated_at
+            FROM qpayd_refunds r
+            JOIN qpayd_invoices i ON i.store_id = r.store_id AND i.id = r.invoice_id
+            WHERE r.store_id = $1
+              AND r.status = 'pending'
+              AND r.destination IS NOT NULL
+              AND (r.execution_lease_until IS NULL OR r.execution_lease_until <= $2)
+            ORDER BY r.created_at ASC
+            LIMIT $3
+            "#,
+        )
+        .bind(store_id)
+        .bind(now.to_rfc3339())
+        .bind(i64::from(limit.clamp(1, 200)))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(refund_execution_candidate_from_pg_row)
+            .collect()
+    }
+
+    async fn claim_refund_execution(
+        &self,
+        store_id: &str,
+        refund_id: Uuid,
+        worker_id: &str,
+        lease_until: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Option<RefundExecutionCandidate>> {
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query(
+            r#"
+            UPDATE qpayd_refunds
+            SET execution_claimed_by = $1,
+                execution_lease_until = $2,
+                updated_at = $3
+            WHERE store_id = $4
+              AND id = $5
+              AND status = 'pending'
+              AND destination IS NOT NULL
+              AND (execution_lease_until IS NULL OR execution_lease_until <= $6)
+            "#,
+        )
+        .bind(worker_id)
+        .bind(lease_until.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(store_id)
+        .bind(refund_id.to_string())
+        .bind(now.to_rfc3339())
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() == 0 {
+            tx.commit().await?;
+            return Ok(None);
+        }
+        let row = sqlx::query(
+            r#"
+            SELECT
+                r.id AS refund_id, r.store_id AS refund_store_id, r.invoice_id AS refund_invoice_id,
+                r.status AS refund_status, r.amount_sats AS refund_amount_sats,
+                r.destination AS refund_destination, r.destination_type AS refund_destination_type,
+                r.reason AS refund_reason, r.tx_id AS refund_tx_id, r.payment_proof AS refund_payment_proof,
+                r.failure_reason AS refund_failure_reason, r.idempotency_key AS refund_idempotency_key,
+                r.metadata AS refund_metadata, r.created_at AS refund_created_at,
+                r.updated_at AS refund_updated_at, r.finalized_at AS refund_finalized_at,
+                i.id AS invoice_id, i.store_id AS invoice_store_id, i.status AS invoice_status,
+                i.amount AS invoice_amount, i.currency AS invoice_currency,
+                i.btc_amount_sats AS invoice_btc_amount_sats, i.paid_sats AS invoice_paid_sats,
+                i.confirmed_sats AS invoice_confirmed_sats, i.unconfirmed_sats AS invoice_unconfirmed_sats,
+                i.onchain_address AS invoice_onchain_address, i.onchain_address_index AS invoice_onchain_address_index,
+                i.onchain_script_pubkey AS invoice_onchain_script_pubkey,
+                i.lightning_bolt11 AS invoice_lightning_bolt11,
+                i.lightning_payment_hash AS invoice_lightning_payment_hash,
+                i.idempotency_key AS invoice_idempotency_key, i.payment_link_id AS invoice_payment_link_id,
+                i.rate_source AS invoice_rate_source, i.rate AS invoice_rate, i.metadata AS invoice_metadata,
+                i.expires_at AS invoice_expires_at, i.created_at AS invoice_created_at,
+                i.updated_at AS invoice_updated_at
+            FROM qpayd_refunds r
+            JOIN qpayd_invoices i ON i.store_id = r.store_id AND i.id = r.invoice_id
+            WHERE r.store_id = $1 AND r.id = $2
+            "#,
+        )
+        .bind(store_id)
+        .bind(refund_id.to_string())
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(refund_execution_candidate_from_pg_row(row)?))
+    }
+
     async fn update_refund_status(
         &self,
         refund: &Refund,
@@ -1769,6 +2026,22 @@ const SQLITE_MIGRATIONS: &[Migration] = &[
             "#,
         ],
     },
+    Migration {
+        version: 7,
+        name: "refund_execution_claims",
+        statements: &[
+            r#"
+        ALTER TABLE refunds ADD COLUMN execution_claimed_by TEXT
+        "#,
+            r#"
+        ALTER TABLE refunds ADD COLUMN execution_lease_until TEXT
+        "#,
+            r#"
+        CREATE INDEX IF NOT EXISTS refunds_execution_due_idx
+        ON refunds (store_id, status, execution_lease_until, created_at)
+            "#,
+        ],
+    },
 ];
 
 const POSTGRES_MIGRATIONS: &[Migration] = &[
@@ -1958,6 +2231,22 @@ const POSTGRES_MIGRATIONS: &[Migration] = &[
         CREATE UNIQUE INDEX IF NOT EXISTS qpayd_refunds_store_idempotency_key_idx
         ON qpayd_refunds (store_id, idempotency_key)
         WHERE idempotency_key IS NOT NULL
+            "#,
+        ],
+    },
+    Migration {
+        version: 7,
+        name: "refund_execution_claims",
+        statements: &[
+            r#"
+        ALTER TABLE qpayd_refunds ADD COLUMN execution_claimed_by TEXT
+        "#,
+            r#"
+        ALTER TABLE qpayd_refunds ADD COLUMN execution_lease_until TEXT
+        "#,
+            r#"
+        CREATE INDEX IF NOT EXISTS qpayd_refunds_execution_due_idx
+        ON qpayd_refunds (store_id, status, execution_lease_until, created_at)
             "#,
         ],
     },
@@ -2244,6 +2533,178 @@ fn refund_from_pg_row(row: sqlx::postgres::PgRow) -> anyhow::Result<Refund> {
     )
 }
 
+#[allow(dead_code)]
+fn refund_execution_candidate_from_row(
+    row: sqlx::sqlite::SqliteRow,
+) -> anyhow::Result<RefundExecutionCandidate> {
+    Ok(RefundExecutionCandidate {
+        refund: refund_from_aliased_fields(&row)?,
+        invoice: invoice_from_aliased_fields(&row)?,
+    })
+}
+
+#[allow(dead_code)]
+fn refund_execution_candidate_from_pg_row(
+    row: sqlx::postgres::PgRow,
+) -> anyhow::Result<RefundExecutionCandidate> {
+    Ok(RefundExecutionCandidate {
+        refund: refund_from_aliased_pg_fields(&row)?,
+        invoice: invoice_from_aliased_pg_fields(&row)?,
+    })
+}
+
+#[allow(dead_code)]
+fn refund_from_aliased_fields(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Refund> {
+    refund_from_fields(
+        row.get("refund_id"),
+        row.get("refund_store_id"),
+        row.get("refund_invoice_id"),
+        row.get("refund_status"),
+        row.get::<i64, _>("refund_amount_sats"),
+        row.get("refund_destination"),
+        row.get("refund_destination_type"),
+        row.get("refund_reason"),
+        row.get("refund_tx_id"),
+        row.get("refund_payment_proof"),
+        row.get("refund_failure_reason"),
+        row.get("refund_idempotency_key"),
+        row.get("refund_metadata"),
+        row.get("refund_created_at"),
+        row.get("refund_updated_at"),
+        row.get("refund_finalized_at"),
+    )
+}
+
+#[allow(dead_code)]
+fn refund_from_aliased_pg_fields(row: &sqlx::postgres::PgRow) -> anyhow::Result<Refund> {
+    refund_from_fields(
+        row.get("refund_id"),
+        row.get("refund_store_id"),
+        row.get("refund_invoice_id"),
+        row.get("refund_status"),
+        row.get::<i64, _>("refund_amount_sats"),
+        row.get("refund_destination"),
+        row.get("refund_destination_type"),
+        row.get("refund_reason"),
+        row.get("refund_tx_id"),
+        row.get("refund_payment_proof"),
+        row.get("refund_failure_reason"),
+        row.get("refund_idempotency_key"),
+        row.get("refund_metadata"),
+        row.get("refund_created_at"),
+        row.get("refund_updated_at"),
+        row.get("refund_finalized_at"),
+    )
+}
+
+#[allow(dead_code)]
+fn invoice_from_aliased_fields(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Invoice> {
+    invoice_from_fields(
+        row.get("invoice_id"),
+        row.get("invoice_store_id"),
+        row.get("invoice_status"),
+        row.get("invoice_amount"),
+        row.get("invoice_currency"),
+        row.get::<i64, _>("invoice_btc_amount_sats"),
+        row.get::<i64, _>("invoice_paid_sats"),
+        row.get::<i64, _>("invoice_confirmed_sats"),
+        row.get::<i64, _>("invoice_unconfirmed_sats"),
+        row.get("invoice_onchain_address"),
+        row.get::<Option<i64>, _>("invoice_onchain_address_index"),
+        row.get("invoice_onchain_script_pubkey"),
+        row.get("invoice_lightning_bolt11"),
+        row.get("invoice_lightning_payment_hash"),
+        row.get("invoice_idempotency_key"),
+        row.get("invoice_payment_link_id"),
+        row.get("invoice_rate_source"),
+        row.get("invoice_rate"),
+        row.get("invoice_metadata"),
+        row.get("invoice_expires_at"),
+        row.get("invoice_created_at"),
+        row.get("invoice_updated_at"),
+    )
+}
+
+#[allow(dead_code)]
+fn invoice_from_aliased_pg_fields(row: &sqlx::postgres::PgRow) -> anyhow::Result<Invoice> {
+    invoice_from_fields(
+        row.get("invoice_id"),
+        row.get("invoice_store_id"),
+        row.get("invoice_status"),
+        row.get("invoice_amount"),
+        row.get("invoice_currency"),
+        row.get::<i64, _>("invoice_btc_amount_sats"),
+        row.get::<i64, _>("invoice_paid_sats"),
+        row.get::<i64, _>("invoice_confirmed_sats"),
+        row.get::<i64, _>("invoice_unconfirmed_sats"),
+        row.get("invoice_onchain_address"),
+        row.get::<Option<i64>, _>("invoice_onchain_address_index"),
+        row.get("invoice_onchain_script_pubkey"),
+        row.get("invoice_lightning_bolt11"),
+        row.get("invoice_lightning_payment_hash"),
+        row.get("invoice_idempotency_key"),
+        row.get("invoice_payment_link_id"),
+        row.get("invoice_rate_source"),
+        row.get("invoice_rate"),
+        row.get("invoice_metadata"),
+        row.get("invoice_expires_at"),
+        row.get("invoice_created_at"),
+        row.get("invoice_updated_at"),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+fn invoice_from_fields(
+    id: String,
+    store_id: String,
+    status: String,
+    amount: String,
+    currency: String,
+    btc_amount_sats: i64,
+    paid_sats: i64,
+    confirmed_sats: i64,
+    unconfirmed_sats: i64,
+    onchain_address: Option<String>,
+    onchain_address_index: Option<i64>,
+    onchain_script_pubkey: Option<String>,
+    lightning_bolt11: Option<String>,
+    lightning_payment_hash: Option<String>,
+    idempotency_key: Option<String>,
+    payment_link_id: Option<String>,
+    rate_source: String,
+    rate: String,
+    metadata: String,
+    expires_at: String,
+    created_at: String,
+    updated_at: String,
+) -> anyhow::Result<Invoice> {
+    Ok(Invoice {
+        id: Uuid::parse_str(&id)?,
+        store_id,
+        status: InvoiceStatus::try_from(status.as_str())?,
+        amount: amount.parse::<Decimal>()?,
+        currency,
+        btc_amount_sats: btc_amount_sats as u64,
+        paid_sats: paid_sats as u64,
+        confirmed_sats: confirmed_sats as u64,
+        unconfirmed_sats: unconfirmed_sats as u64,
+        onchain_address,
+        onchain_address_index: onchain_address_index.map(|index| index as u32),
+        onchain_script_pubkey,
+        lightning_bolt11,
+        lightning_payment_hash,
+        idempotency_key,
+        payment_link_id,
+        rate_source,
+        rate: rate.parse::<Decimal>()?,
+        metadata: serde_json::from_str(&metadata)?,
+        expires_at: DateTime::parse_from_rfc3339(&expires_at)?.with_timezone(&Utc),
+        created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
+        updated_at: DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn refund_from_fields(
     id: String,
@@ -2458,6 +2919,12 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refund_execution_claims_are_leased() {
+        let store = test_store().await;
+        refund_execution_claims_are_leased_for(store.as_ref()).await;
+    }
+
+    #[tokio::test]
     async fn sqlite_migrate_records_initial_schema_once() {
         let path = std::env::temp_dir().join(format!("qpayd-migration-test-{}.db", Uuid::new_v4()));
         let store = SqliteStore::connect(&format!("sqlite://{}", path.display()))
@@ -2471,7 +2938,7 @@ mod tests {
             .fetch_all(&store.pool)
             .await
             .unwrap();
-        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.len(), 7);
         assert_eq!(rows[0].get::<i64, _>("version"), 1);
         assert_eq!(rows[0].get::<String, _>("name"), "initial_schema");
         assert_eq!(rows[1].get::<i64, _>("version"), 2);
@@ -2490,6 +2957,8 @@ mod tests {
             rows[5].get::<String, _>("name"),
             "refund_idempotency_and_proofs"
         );
+        assert_eq!(rows[6].get::<i64, _>("version"), 7);
+        assert_eq!(rows[6].get::<String, _>("name"), "refund_execution_claims");
     }
 
     #[tokio::test]
@@ -2503,7 +2972,7 @@ mod tests {
                 .fetch_all(&store.pool)
                 .await
                 .unwrap();
-        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.len(), 7);
         assert_eq!(rows[0].get::<i64, _>("version"), 1);
         assert_eq!(rows[0].get::<String, _>("name"), "initial_schema");
         assert_eq!(rows[1].get::<i64, _>("version"), 2);
@@ -2522,6 +2991,8 @@ mod tests {
             rows[5].get::<String, _>("name"),
             "refund_idempotency_and_proofs"
         );
+        assert_eq!(rows[6].get::<i64, _>("version"), 7);
+        assert_eq!(rows[6].get::<String, _>("name"), "refund_execution_claims");
 
         clean_pg_store(&store).await;
         insert_invoice_persists_event_and_webhook_delivery_for(&store).await;
@@ -2549,6 +3020,9 @@ mod tests {
 
         clean_pg_store(&store).await;
         refund_and_sweep_records_round_trip_for(&store).await;
+
+        clean_pg_store(&store).await;
+        refund_execution_claims_are_leased_for(&store).await;
     }
 
     async fn insert_invoice_persists_event_and_webhook_delivery_for(store: &dyn Store) {
@@ -2882,6 +3356,89 @@ mod tests {
         let sweeps = store.lightning_sweeps(&sweep.store_id, 10).await.unwrap();
         assert_eq!(sweeps.len(), 1);
         assert_eq!(sweeps[0].amount_sats, 125_000);
+    }
+
+    async fn refund_execution_claims_are_leased_for(store: &dyn Store) {
+        let mut invoice = test_invoice(InvoiceStatus::Settled);
+        invoice.paid_sats = 12_000;
+        invoice.confirmed_sats = 12_000;
+        let invoice_event = invoice_created_event(&invoice, invoice.created_at);
+        store
+            .insert_invoice(&invoice, &invoice_event, None)
+            .await
+            .unwrap();
+
+        let now = Utc::now();
+        let refund = Refund {
+            id: Uuid::new_v4(),
+            store_id: invoice.store_id.clone(),
+            invoice_id: invoice.id,
+            status: RefundStatus::Pending,
+            amount_sats: 2_000,
+            destination: Some("bc1qrefund".to_string()),
+            destination_type: Some(RefundDestinationType::BitcoinAddress),
+            reason: None,
+            tx_id: None,
+            payment_proof: None,
+            failure_reason: None,
+            idempotency_key: None,
+            metadata: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+            finalized_at: None,
+        };
+        let refund_event = crate::events::refund_created_event(&refund, now);
+        store
+            .insert_refund(&refund, &refund_event, None)
+            .await
+            .unwrap();
+
+        let pending = store
+            .pending_refund_executions(&refund.store_id, 10, now)
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].refund.id, refund.id);
+        assert_eq!(pending[0].invoice.id, invoice.id);
+
+        let lease_until = now + Duration::minutes(5);
+        let claimed = store
+            .claim_refund_execution(&refund.store_id, refund.id, "worker-1", lease_until, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.refund.id, refund.id);
+
+        let pending = store
+            .pending_refund_executions(&refund.store_id, 10, now)
+            .await
+            .unwrap();
+        assert!(pending.is_empty());
+
+        let second_claim = store
+            .claim_refund_execution(&refund.store_id, refund.id, "worker-2", lease_until, now)
+            .await
+            .unwrap();
+        assert!(second_claim.is_none());
+
+        let after_lease = lease_until + Duration::seconds(1);
+        let pending = store
+            .pending_refund_executions(&refund.store_id, 10, after_lease)
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+
+        let reclaimed = store
+            .claim_refund_execution(
+                &refund.store_id,
+                refund.id,
+                "worker-2",
+                after_lease + Duration::minutes(5),
+                after_lease,
+            )
+            .await
+            .unwrap();
+        assert!(reclaimed.is_some());
     }
 
     async fn test_store() -> Box<dyn Store> {
