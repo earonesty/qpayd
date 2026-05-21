@@ -4,7 +4,7 @@ use anyhow::Context;
 use axum::{
     Json, Router,
     extract::{Path, Query, Request, State},
-    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -13,6 +13,7 @@ use bitcoin::secp256k1::Secp256k1;
 use chrono::{Duration, Utc};
 use miniscript::{Descriptor, DescriptorPublicKey};
 use qrcode::{QrCode, render::svg};
+use reqwest::Url;
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -39,6 +40,7 @@ pub fn router(state: AppState) -> Router {
     let admin_cors_state = state.clone();
     Router::new()
         .route("/", get(index))
+        .route("/admin", get(admin_portal))
         .route("/healthz", get(healthz))
         .route(
             "/v1/public/stores/{store_id}/payment-links/{payment_link_id}/invoices",
@@ -132,6 +134,61 @@ async fn index() -> Html<&'static str> {
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+async fn admin_portal(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let admin = &state.config.server.admin;
+    if !admin.enabled {
+        return Err(ApiError::not_found("admin portal is not enabled"));
+    }
+    let asset_source = admin.asset_source.as_deref().ok_or(ApiError::bad_request(
+        "admin asset source is not configured",
+    ))?;
+    let store_id = admin
+        .store_id
+        .as_deref()
+        .or_else(|| (state.config.stores.len() == 1).then(|| state.config.stores[0].id.as_str()));
+    let store_id = store_id.ok_or(ApiError::bad_request("admin store id is not configured"))?;
+    let integrity = admin.asset_integrity.as_deref();
+    let crossorigin = if asset_source.starts_with("https://") {
+        r#" crossorigin="anonymous""#
+    } else {
+        ""
+    };
+    let integrity_attr = integrity
+        .map(|value| format!(r#" integrity="{}""#, escape_attr(value)))
+        .unwrap_or_default();
+    let html = format!(
+        r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>qpayd admin</title>
+</head>
+<body>
+  <main id="qpayd-admin"></main>
+  <script type="module" src="{asset_source}" data-qpayd-admin data-target="#qpayd-admin" data-store-id="{store_id}"{integrity_attr}{crossorigin}></script>
+</body>
+</html>"##,
+        asset_source = escape_attr(asset_source),
+        store_id = escape_attr(store_id),
+    );
+    let mut response = Html(html).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_str(&admin_csp(asset_source))
+            .map_err(|_| ApiError::bad_request("invalid admin asset source"))?,
+    );
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static("camera=(self)"),
+    );
+    Ok(response)
 }
 
 async fn create_invoice(
@@ -1031,6 +1088,26 @@ fn admin_cors_for_store(
     public_cors_for_allowed_origins(&store.admin_allowed_origins, headers)
 }
 
+fn admin_csp(asset_source: &str) -> String {
+    let script_source = if asset_source.starts_with("https://") {
+        Url::parse(asset_source)
+            .ok()
+            .and_then(|url| {
+                Some(format!(
+                    "{}://{}",
+                    url.scheme(),
+                    url.host_str().map(str::to_string)?
+                ))
+            })
+            .unwrap_or_else(|| "'self'".to_string())
+    } else {
+        "'self'".to_string()
+    };
+    format!(
+        "default-src 'none'; script-src 'self' {script_source}; connect-src 'self'; style-src 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'; object-src 'none'"
+    )
+}
+
 fn most_specific_allowed_origins<'a>(
     server: &'a [String],
     store: &'a [String],
@@ -1072,6 +1149,14 @@ fn public_cors_for_allowed_origins(
 
 fn same_origin(configured: &str, request_origin: &str) -> bool {
     configured.trim_end_matches('/') == request_origin.trim_end_matches('/')
+}
+
+fn escape_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn json_public_response<T: Serialize>(value: T, cors: PublicCors) -> Result<Response, ApiError> {
@@ -1798,6 +1883,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_portal_serves_pinned_asset_bootstrap() {
+        let mut config = test_config();
+        config.server.admin.enabled = true;
+        config.server.admin.store_id = Some("main".to_string());
+        config.server.admin.asset_source =
+            Some("https://cdn.jsdelivr.net/npm/@qpayd/admin@0.4.0/src/index.js".to_string());
+        config.server.admin.asset_integrity = Some("sha384-testdigest".to_string());
+        let app = test_app_with_config(config).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .contains("https://cdn.jsdelivr.net")
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("data-qpayd-admin"));
+        assert!(body.contains("data-store-id=\"main\""));
+        assert!(body.contains("integrity=\"sha384-testdigest\""));
+        assert!(body.contains("crossorigin=\"anonymous\""));
     }
 
     #[tokio::test]

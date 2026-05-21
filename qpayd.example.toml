@@ -3,6 +3,12 @@ listen = "127.0.0.1:8080"
 onchain_poll_seconds = 30
 # public_allowed_origins = ["https://example.com"]
 
+# [server.admin]
+# enabled = true
+# store_id = "main"
+# asset_source = "https://cdn.jsdelivr.net/npm/@qpayd/admin@0.4.0/src/index.js"
+# asset_integrity = "sha384-..."
+
 [database]
 url = "sqlite://qpayd.db"
 

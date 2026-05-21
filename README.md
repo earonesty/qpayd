@@ -370,6 +370,18 @@ id = "main"
 admin_allowed_origins = ["https://admin.example.com"]
 ```
 
+qpayd can also serve a minimal `/admin` bootstrap page that loads a pinned
+admin asset. The daemon does not bundle the admin UI; update the URL and SRI
+hash in config when you want to move the portal to a newer release:
+
+```toml
+[server.admin]
+enabled = true
+store_id = "main"
+asset_source = "https://cdn.jsdelivr.net/npm/@qpayd/admin@0.4.0/src/index.js"
+asset_integrity = "sha384-..."
+```
+
 Create an invoice from browser code:
 
 ```sh
@@ -419,15 +431,15 @@ curl -sS \
 
 The browser status is only customer UX. Fulfill orders from signed webhooks.
 
-## JavaScript Modal
+## Checkout Package
 
-The `js/` folder contains a small browser client that makes payment links feel
-like a hosted checkout while keeping the UI in your site:
+`@qpayd/checkout` makes payment links feel like a hosted checkout while keeping
+the UI in your site:
 
 ```html
 <button id="pay">Pay with Bitcoin</button>
 <script type="module">
-  import { openPaymentLink } from "/js/src/index.js";
+  import { openPaymentLink } from "https://cdn.jsdelivr.net/npm/@qpayd/checkout@0.4.0/src/index.js";
 
   document.querySelector("#pay").addEventListener("click", () => {
     openPaymentLink({

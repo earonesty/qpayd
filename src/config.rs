@@ -1,6 +1,7 @@
 use std::{collections::HashSet, fs, path::Path};
 
 use anyhow::{Context, bail};
+use reqwest::Url;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
@@ -23,6 +24,17 @@ pub struct ServerConfig {
     pub onchain_poll_seconds: u64,
     #[serde(default)]
     pub public_allowed_origins: Vec<String>,
+    #[serde(default)]
+    pub admin: AdminPortalConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AdminPortalConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub store_id: Option<String>,
+    pub asset_source: Option<String>,
+    pub asset_integrity: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -141,6 +153,7 @@ impl Config {
             "server.public_allowed_origins",
             &self.server.public_allowed_origins,
         )?;
+        validate_admin_portal(&self.server.admin, &self.stores)?;
 
         let mut ids = HashSet::new();
         for store in &self.stores {
@@ -358,6 +371,7 @@ impl Default for ServerConfig {
             listen: default_listen(),
             onchain_poll_seconds: default_onchain_poll_seconds(),
             public_allowed_origins: Vec::new(),
+            admin: AdminPortalConfig::default(),
         }
     }
 }
@@ -430,6 +444,59 @@ fn validate_public_allowed_origins(scope: &str, origins: &[String]) -> anyhow::R
     Ok(())
 }
 
+fn validate_admin_portal(admin: &AdminPortalConfig, stores: &[StoreConfig]) -> anyhow::Result<()> {
+    if !admin.enabled {
+        return Ok(());
+    }
+    let asset_source = admin
+        .asset_source
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("server.admin.asset_source is required when enabled"))?;
+    if asset_source.trim() != asset_source || asset_source.is_empty() {
+        bail!("server.admin.asset_source cannot be empty or contain surrounding whitespace");
+    }
+    if asset_source.contains("@latest") {
+        bail!("server.admin.asset_source must pin an exact asset version");
+    }
+    if asset_source.starts_with("https://") {
+        let url =
+            Url::parse(asset_source).context("server.admin.asset_source is not a valid URL")?;
+        if url.host_str().is_none() {
+            bail!("server.admin.asset_source URL must include a host");
+        }
+        let integrity = admin.asset_integrity.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("server.admin.asset_integrity is required for remote assets")
+        })?;
+        validate_script_integrity(integrity)?;
+    } else if asset_source.starts_with("http://") {
+        bail!("server.admin.asset_source remote assets must use https");
+    } else if !asset_source.starts_with('/') {
+        bail!("server.admin.asset_source must be an https URL or absolute same-origin path");
+    }
+
+    if let Some(store_id) = &admin.store_id {
+        if !stores.iter().any(|store| store.id == *store_id) {
+            bail!("server.admin.store_id {store_id:?} does not match a configured store");
+        }
+    } else if stores.len() != 1 {
+        bail!("server.admin.store_id is required when more than one store is configured");
+    }
+    Ok(())
+}
+
+fn validate_script_integrity(integrity: &str) -> anyhow::Result<()> {
+    if integrity.trim() != integrity || integrity.is_empty() {
+        bail!("server.admin.asset_integrity cannot be empty or contain surrounding whitespace");
+    }
+    let Some((algorithm, digest)) = integrity.split_once('-') else {
+        bail!("server.admin.asset_integrity must use browser SRI format");
+    };
+    if !matches!(algorithm, "sha256" | "sha384" | "sha512") || digest.is_empty() {
+        bail!("server.admin.asset_integrity must use sha256, sha384, or sha512");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::Config;
@@ -468,6 +535,62 @@ mod tests {
             .unwrap();
         assert_eq!(link.currency, "USD");
         assert_eq!(link.metadata["kind"], "donation");
+    }
+
+    #[test]
+    fn validates_admin_portal_asset_policy() {
+        let config: Config = toml::from_str(
+            r#"
+            [server.admin]
+            enabled = true
+            asset_source = "https://cdn.jsdelivr.net/npm/@qpayd/admin@0.4.0/src/index.js"
+            asset_integrity = "sha384-testdigest"
+
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+            "#,
+        )
+        .unwrap();
+
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_remote_admin_portal_without_integrity() {
+        let config: Config = toml::from_str(
+            r#"
+            [server.admin]
+            enabled = true
+            asset_source = "https://cdn.jsdelivr.net/npm/@qpayd/admin@0.4.0/src/index.js"
+
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+            "#,
+        )
+        .unwrap();
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("asset_integrity is required"));
     }
 
     #[test]

@@ -118,6 +118,19 @@ export function mountQPaydAdmin(target, options) {
   };
 }
 
+function autoMountQPaydAdmin() {
+  if (typeof document === "undefined") return;
+  const script = document.querySelector("script[data-qpayd-admin]");
+  if (!script) return;
+  const target = script.dataset.target || "#qpayd-admin";
+  mountQPaydAdmin(target, {
+    baseUrl: script.dataset.baseUrl || window.location.origin,
+    storeId: script.dataset.storeId
+  });
+}
+
+autoMountQPaydAdmin();
+
 function render(root, state) {
   root.className = "qpayd-admin";
   root.innerHTML = state.client.token ? appHtml(state) : loginHtml(state);

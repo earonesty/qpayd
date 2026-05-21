@@ -1,14 +1,17 @@
-# @qpayd/js
+# qpayd browser packages
 
-Browser helpers for qpayd payment flows.
+qpayd publishes separate browser packages for customer checkout and merchant
+admin workflows.
 
-The package does not need a build step. Import the ESM module and open a modal
-from a configured public payment link:
+## @qpayd/checkout
+
+Browser helpers for qpayd payment flows. The package does not need a build step.
+Import the ESM module and open a modal from a configured public payment link:
 
 ```html
 <button id="pay">Pay with Bitcoin</button>
 <script type="module">
-  import { openPaymentLink } from "./js/src/index.js";
+  import { openPaymentLink } from "@qpayd/checkout";
 
   document.querySelector("#pay").addEventListener("click", () => {
     openPaymentLink({
@@ -32,7 +35,7 @@ JSON into `openInvoiceModal({ client, invoice })`.
 
 The modal is customer UX only. Fulfill orders from qpayd signed webhooks.
 
-## Admin Panel
+## @qpayd/admin
 
 The admin panel is a browser-only UI that talks directly to the qpayd admin API.
 Configure the qpayd base URL and store id when mounting it; the login form asks
@@ -41,7 +44,7 @@ for the store API token.
 ```html
 <main id="qpayd-admin"></main>
 <script type="module">
-  import { mountQPaydAdmin } from "@qpayd/js/admin";
+  import { mountQPaydAdmin } from "@qpayd/admin";
 
   mountQPaydAdmin("#qpayd-admin", {
     baseUrl: "https://pay.example.com",

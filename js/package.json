@@ -1,22 +1,12 @@
 {
-  "name": "@qpayd/js",
-  "version": "0.4.0",
-  "description": "Browser checkout and admin UI helpers for qpayd.",
+  "private": true,
   "type": "module",
-  "exports": {
-    ".": "./src/index.js",
-    "./admin": "./src/admin.js"
-  },
-  "files": [
-    "src",
-    "examples"
+  "workspaces": [
+    "packages/*"
   ],
   "scripts": {
-    "check": "node --check src/index.js && node --check src/admin.js",
-    "test": "node --test"
-  },
-  "publishConfig": {
-    "access": "public"
-  },
-  "license": "MIT"
+    "check": "npm --workspaces run check",
+    "pack:dry-run": "npm --workspaces pack --dry-run",
+    "test": "npm --workspaces test --if-present"
+  }
 }

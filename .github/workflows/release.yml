@@ -38,7 +38,7 @@ jobs:
       - run: cargo fmt -- --check
       - run: cargo test
       - run: cargo clippy --all-targets -- -D warnings
-      - run: node --check js/src/index.js
+      - run: npm --prefix js run check
       - run: ./scripts/smoke-barkd.sh
       - run: cargo build --release --locked
 
