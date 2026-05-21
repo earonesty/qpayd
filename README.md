@@ -77,7 +77,29 @@ metadata = { kind = "donation", source = "static-site" }
 ```
 
 With Phoenixd configured, qpayd creates BOLT11 invoices and polls Phoenixd for
-incoming payment status during reconciliation.
+incoming payment status during reconciliation:
+
+```toml
+[stores.lightning]
+backend = "phoenixd"
+url = "http://127.0.0.1:9740"
+api_password_env = "PHOENIXD_LIMITED_PASSWORD"
+```
+
+Barkd can be used instead of Phoenixd:
+
+```toml
+[stores.lightning]
+backend = "barkd"
+url = "http://127.0.0.1:3000"
+api_password_env = "BARKD_AUTH_TOKEN"
+```
+
+Set `BARKD_AUTH_TOKEN` to the bearer token shown by:
+
+```sh
+barkd --datadir /var/lib/barkd secret show
+```
 
 Run the sweep service separately from the payment daemon:
 
@@ -106,6 +128,8 @@ export QPAYD_MAIN_DESCRIPTOR="wpkh([00000000/84h/0h/0h]xpub.../0/*)"
 export QPAYD_MAIN_TREASURY_DESCRIPTOR="wpkh([00000000/84h/0h/0h]xpub.../0/*)"
 export PHOENIXD_LIMITED_PASSWORD="$(openssl rand -hex 32)"
 export PHOENIXD_FULL_PASSWORD="$(openssl rand -hex 32)"
+# If using barkd instead of Phoenixd:
+export BARKD_AUTH_TOKEN="$(barkd --datadir /var/lib/barkd secret show)"
 ```
 
 ## Link A Bitcoin Wallet
@@ -395,9 +419,9 @@ for customer support or retry flows. Use `expired` to release inventory. Use
 
 ## Webhooks
 
-When `webhook_url` is configured, qpayd records each event in SQLite and
-delivers it from a retry queue. Invoice creation does not depend on the receiver
-being online.
+When `webhook_url` is configured, qpayd records each event in the configured
+database and delivers it from a retry queue. Invoice creation does not depend on
+the receiver being online.
 
 Events currently emitted:
 
