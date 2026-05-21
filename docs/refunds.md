@@ -1,18 +1,18 @@
 ---
 title: Refund Workflows
-description: Track refunds without giving qpayd spend authority.
+description: Track refunds and configure scoped payout authority.
 order: 40
 ---
 
 # Refund workflows
 
-qpayd records refund requests and links them to the original invoice. The actual
-refund payment is sent from the wallet or Lightning node that controls the
-money.
+qpayd records refund requests and links them to the original invoice. Refunds can
+be finalized manually after payment, or executed by a configured per-store payout
+backend.
 
 For on-chain stores, qpayd normally has a watch-only descriptor. For Lightning,
-invoice creation should use limited credentials. Keep full spending credentials
-in the wallet, node, or private sweep deployment.
+invoice creation should use limited credentials. Keep payout credentials on the
+wallet host or a private qpayd deployment that handles sweeps and refunds.
 
 Read refund state for an invoice:
 
@@ -25,7 +25,7 @@ Create an invoice-scoped refund record:
 
 ```sh
 curl -sS https://pay.example.com/v1/stores/main/invoices/$INVOICE_ID/refunds \
-  -H "Authorization: Bearer $QPAYD_MAIN_REFUND_TOKEN" \
+  -H "Authorization: Bearer $QPAYD_MAIN_PAYOUT_TOKEN" \
   -H "Idempotency-Key: refund_order_123" \
   -H "Content-Type: application/json" \
   -d '{
@@ -39,7 +39,7 @@ Finalize it after the refund payment is sent:
 
 ```sh
 curl -sS -X POST https://pay.example.com/v1/stores/main/refunds/$REFUND_ID/finalize \
-  -H "Authorization: Bearer $QPAYD_MAIN_REFUND_TOKEN" \
+  -H "Authorization: Bearer $QPAYD_MAIN_PAYOUT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "tx_id": "...", "payment_proof": "..." }'
 ```
@@ -48,7 +48,7 @@ Mark it failed if the operator or refund executor cannot complete the payment:
 
 ```sh
 curl -sS -X POST https://pay.example.com/v1/stores/main/refunds/$REFUND_ID/fail \
-  -H "Authorization: Bearer $QPAYD_MAIN_REFUND_TOKEN" \
+  -H "Authorization: Bearer $QPAYD_MAIN_PAYOUT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "failure_reason": "expired lightning invoice" }'
 ```
@@ -57,7 +57,7 @@ Cancel a pending refund:
 
 ```sh
 curl -sS -X POST https://pay.example.com/v1/stores/main/refunds/$REFUND_ID/cancel \
-  -H "Authorization: Bearer $QPAYD_MAIN_REFUND_TOKEN"
+  -H "Authorization: Bearer $QPAYD_MAIN_PAYOUT_TOKEN"
 ```
 
 Pending and finalized refunds count against the invoice refundable balance.
@@ -65,54 +65,57 @@ Canceled and failed refunds do not. Refund responses include optional
 `destination_type`, `idempotency_key`, `payment_proof`, and `failure_reason`
 fields.
 
-Stores can use a scoped refund token:
+Use a scoped payout token globally, or override it per store:
 
 ```toml
+[auth]
+payout_token_env = "QPAYD_PAYOUT_TOKEN"
+
 [[stores]]
 id = "main"
-refund_token_env = "QPAYD_MAIN_REFUND_TOKEN"
+payout_token_env = "QPAYD_MAIN_PAYOUT_TOKEN"
 ```
 
-If `refund_token_env` is configured, refund create, finalize, fail, and cancel
+If `payout_token_env` is configured, refund create, finalize, fail, and cancel
 requests must use that token. If it is omitted, refund mutations use
 `admin_token_env` when configured, otherwise `api_token_env`.
 
-## Hot-wallet refund config
+## Refund Execution Config
 
-qpayd has per-store config for hot-wallet services that will execute pending
-refunds in a future release. The config can live in the same `qpayd.toml` as the
-public receive service, or in a separate config used on the wallet host.
+qpayd has per-store payout config for refund execution. Lightning payouts share
+the same wallet access used for sweeps. Bitcoin payouts use a bitcoind RPC wallet
+with spend access.
 
-Tiny sites can run receive, sweeps, and hot refunds together. Stores that use
-sweeps or hot refunds should run the hot-wallet service on the wallet host or a
-private server.
+Tiny sites can run receive, sweeps, and refunds together. Stores that use sweeps
+or refund execution should run those commands on the wallet host or a private
+server.
 
 ```toml
-[[stores.hot_wallets]]
-id = "lightning-refunds"
-enabled = true
-refund_execution_enabled = false
+[stores.lightning_payout]
 backend = "phoenixd" # or "barkd"
 url = "http://127.0.0.1:PORT"
 full_api_password_env = "QPAYD_LIGHTNING_REFUND_PASSWORD"
+
+[stores.lightning_payout.refunds]
+enabled = true
 max_refund_sats = 100000
 daily_refund_limit_sats = 500000
 manual_approval_threshold_sats = 250000
-refund_poll_seconds = 30
+poll_seconds = 30
 
-[[stores.hot_wallets]]
-id = "bitcoin-refunds"
-enabled = true
-refund_execution_enabled = false
+[stores.bitcoin_payout]
 backend = "bitcoind"
 url = "http://127.0.0.1:PORT"
-full_api_password_env = "QPAYD_BITCOIN_REFUND_PASSWORD"
+wallet = "refunds"
+rpc_auth_env = "QPAYD_BITCOIN_REFUND_RPC_AUTH"
+
+[stores.bitcoin_payout.refunds]
+enabled = true
 max_refund_sats = 100000
 daily_refund_limit_sats = 500000
 manual_approval_threshold_sats = 250000
-refund_poll_seconds = 30
+poll_seconds = 30
 ```
 
-Keep `refund_execution_enabled = false` until refund execution is released, and
-continue finalizing or failing refunds manually. Backend-specific wallet
-configuration is covered in [Lightning backends](./lightning-backends.md).
+Backend-specific wallet configuration is covered in
+[Lightning backends](./lightning-backends.md).

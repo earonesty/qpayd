@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::{LightningBackend, LightningConfig, LightningSweepConfig},
+    config::{LightningBackend, LightningConfig, LightningPayoutConfig, LightningSweepConfig},
     invoice::{Invoice, InvoiceStatus},
 };
 
@@ -57,12 +57,13 @@ pub async fn create_invoice(
 }
 
 pub async fn sweep_to_address(
-    config: &LightningSweepConfig,
+    payout: &LightningPayoutConfig,
+    sweep: &LightningSweepConfig,
     address: String,
 ) -> anyhow::Result<Option<SweepResult>> {
-    match config.backend {
-        LightningBackend::Phoenixd => sweep_phoenixd_to_address(config, address).await,
-        LightningBackend::Barkd => sweep_barkd_to_address(config, address).await,
+    match payout.backend {
+        LightningBackend::Phoenixd => sweep_phoenixd_to_address(payout, sweep, address).await,
+        LightningBackend::Barkd => sweep_barkd_to_address(payout, sweep, address).await,
     }
 }
 
@@ -290,17 +291,18 @@ fn lightning_api_secret(config: &LightningConfig) -> anyhow::Result<String> {
 }
 
 async fn sweep_phoenixd_to_address(
-    config: &LightningSweepConfig,
+    payout: &LightningPayoutConfig,
+    sweep: &LightningSweepConfig,
     address: String,
 ) -> anyhow::Result<Option<SweepResult>> {
-    let password = std::env::var(&config.full_api_password_env)
-        .with_context(|| format!("missing env var {}", config.full_api_password_env))?;
+    let password = std::env::var(&payout.full_api_password_env)
+        .with_context(|| format!("missing env var {}", payout.full_api_password_env))?;
     let client = crate::http::client();
-    let balance = get_phoenixd_balance(config.url.as_str(), &client, &password).await?;
+    let balance = get_phoenixd_balance(payout.url.as_str(), &client, &password).await?;
     let decision = sweep_decision(
         balance.balance_sats,
-        config.min_balance_sats,
-        config.target_balance_sats,
+        sweep.min_balance_sats,
+        sweep.target_balance_sats,
     );
     let Some(amount_sats) = decision.amount_sats else {
         return Ok(None);
@@ -311,14 +313,14 @@ async fn sweep_phoenixd_to_address(
         ("amountSat", amount_sats.to_string()),
     ];
     let feerate;
-    if let Some(value) = config.feerate_sat_byte {
+    if let Some(value) = sweep.feerate_sat_byte {
         feerate = value.to_string();
         form.push(("feerateSatByte", feerate));
     }
     let response: PhoenixdSendToAddressResponse = client
         .post(format!(
             "{}/sendtoaddress",
-            config.url.trim_end_matches('/')
+            payout.url.trim_end_matches('/')
         ))
         .basic_auth("", Some(password))
         .form(&form)
@@ -340,17 +342,18 @@ async fn sweep_phoenixd_to_address(
 }
 
 async fn sweep_barkd_to_address(
-    config: &LightningSweepConfig,
+    payout: &LightningPayoutConfig,
+    sweep: &LightningSweepConfig,
     address: String,
 ) -> anyhow::Result<Option<SweepResult>> {
-    let token = std::env::var(&config.full_api_password_env)
-        .with_context(|| format!("missing env var {}", config.full_api_password_env))?;
+    let token = std::env::var(&payout.full_api_password_env)
+        .with_context(|| format!("missing env var {}", payout.full_api_password_env))?;
     let client = crate::http::client();
-    let balance = get_barkd_balance(config.url.as_str(), &client, &token).await?;
+    let balance = get_barkd_balance(payout.url.as_str(), &client, &token).await?;
     let decision = sweep_decision(
         balance.spendable_sats,
-        config.min_balance_sats,
-        config.target_balance_sats,
+        sweep.min_balance_sats,
+        sweep.target_balance_sats,
     );
     let Some(amount_sats) = decision.amount_sats else {
         return Ok(None);
@@ -359,7 +362,7 @@ async fn sweep_barkd_to_address(
     let response: BarkdSendOnchainResponse = client
         .post(format!(
             "{}/api/v1/wallet/send-onchain",
-            config.url.trim_end_matches('/')
+            payout.url.trim_end_matches('/')
         ))
         .bearer_auth(token)
         .json(&BarkdSendOnchainRequest {
@@ -525,7 +528,7 @@ mod tests {
         next_status, observe, sweep_decision, sweep_to_address,
     };
     use crate::{
-        config::{LightningBackend, LightningConfig, LightningSweepConfig},
+        config::{LightningBackend, LightningConfig, LightningPayoutConfig, LightningSweepConfig},
         invoice::{Invoice, InvoiceStatus},
     };
 
@@ -681,10 +684,23 @@ mod tests {
             std::env::set_var(&env, "test-token");
         }
         let result = sweep_to_address(
-            &LightningSweepConfig {
+            &LightningPayoutConfig {
                 backend: LightningBackend::Barkd,
                 url: server,
                 full_api_password_env: env,
+                refunds: None,
+                sweep: Some(LightningSweepConfig {
+                    enabled: true,
+                    destination_descriptor: None,
+                    destination_descriptor_env: None,
+                    min_balance_sats: 100_000,
+                    target_balance_sats: 25_000,
+                    interval_seconds: 3600,
+                    feerate_sat_byte: None,
+                }),
+            },
+            &LightningSweepConfig {
+                enabled: true,
                 destination_descriptor: None,
                 destination_descriptor_env: None,
                 min_balance_sats: 100_000,

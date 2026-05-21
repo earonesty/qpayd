@@ -208,7 +208,7 @@ async fn create_invoice(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_api(store_cfg, &headers)?;
+    authorize_api(&state.config.auth, store_cfg, &headers)?;
     let idempotency_key = idempotency_key_from_headers(&headers)?;
     if let Some(key) = &idempotency_key
         && let Some(invoice) = state
@@ -506,7 +506,7 @@ async fn list_events(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_admin(store_cfg, &headers)?;
+    authorize_admin(&state.config.auth, store_cfg, &headers)?;
 
     Ok(Json(
         state
@@ -526,7 +526,7 @@ async fn list_invoices(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_admin(store_cfg, &headers)?;
+    authorize_admin(&state.config.auth, store_cfg, &headers)?;
     let status = query
         .status
         .as_deref()
@@ -590,7 +590,7 @@ async fn create_refund_for_invoice(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_refund(store_cfg, &headers)?;
+    authorize_payout(&state.config.auth, store_cfg, &headers)?;
     let invoice = state
         .store
         .invoice(&store_id, invoice_id)
@@ -673,7 +673,7 @@ async fn get_invoice_refund_summary(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_admin(store_cfg, &headers)?;
+    authorize_admin(&state.config.auth, store_cfg, &headers)?;
     let invoice = state
         .store
         .invoice(&store_id, invoice_id)
@@ -699,7 +699,7 @@ async fn list_invoice_refunds(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_admin(store_cfg, &headers)?;
+    authorize_admin(&state.config.auth, store_cfg, &headers)?;
     if state.store.invoice(&store_id, invoice_id).await?.is_none() {
         return Err(ApiError::not_found("invoice not found"));
     }
@@ -721,7 +721,7 @@ async fn list_refunds(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_admin(store_cfg, &headers)?;
+    authorize_admin(&state.config.auth, store_cfg, &headers)?;
     Ok(Json(
         state
             .store
@@ -739,7 +739,7 @@ async fn get_refund(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_admin(store_cfg, &headers)?;
+    authorize_admin(&state.config.auth, store_cfg, &headers)?;
     let refund = state
         .store
         .refund(&store_id, refund_id)
@@ -758,7 +758,7 @@ async fn finalize_refund(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_refund(store_cfg, &headers)?;
+    authorize_payout(&state.config.auth, store_cfg, &headers)?;
     let mut refund = state
         .store
         .refund(&store_id, refund_id)
@@ -794,7 +794,7 @@ async fn fail_refund(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_refund(store_cfg, &headers)?;
+    authorize_payout(&state.config.auth, store_cfg, &headers)?;
     let mut refund = state
         .store
         .refund(&store_id, refund_id)
@@ -829,7 +829,7 @@ async fn cancel_refund(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_refund(store_cfg, &headers)?;
+    authorize_payout(&state.config.auth, store_cfg, &headers)?;
     let mut refund = state
         .store
         .refund(&store_id, refund_id)
@@ -860,7 +860,7 @@ async fn get_lightning_balance(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_admin(store_cfg, &headers)?;
+    authorize_admin(&state.config.auth, store_cfg, &headers)?;
     let lightning = store_cfg
         .lightning
         .as_ref()
@@ -888,11 +888,17 @@ async fn create_lightning_sweep(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_admin(store_cfg, &headers)?;
-    let sweep_cfg = store_cfg
-        .lightning_sweep
+    authorize_admin(&state.config.auth, store_cfg, &headers)?;
+    let payout_cfg = store_cfg
+        .effective_lightning_payout()
+        .ok_or(ApiError::not_found("store has no lightning_payout config"))?;
+    let sweep_cfg = payout_cfg
+        .sweep
         .as_ref()
-        .ok_or(ApiError::not_found("store has no lightning_sweep config"))?;
+        .filter(|sweep| sweep.enabled)
+        .ok_or(ApiError::not_found(
+            "store has no enabled lightning_payout.sweep config",
+        ))?;
     let network = store_cfg
         .onchain
         .as_ref()
@@ -902,47 +908,49 @@ async fn create_lightning_sweep(
         .context("invalid bitcoin network")?;
     let destination = derive_lightning_sweep_address(sweep_cfg, network)?;
     let now = Utc::now();
-    let record = match crate::lightning::sweep_to_address(sweep_cfg, destination.clone()).await {
-        Ok(Some(result)) => LightningSweepRecord {
-            id: Uuid::new_v4(),
-            store_id: store_id.clone(),
-            backend: sweep_cfg.backend.as_str().to_string(),
-            status: SweepStatus::Succeeded,
-            balance_sats: result.balance_sats,
-            amount_sats: result.amount_sats,
-            address: result.address,
-            tx_id: result.tx_id,
-            error: None,
-            created_at: now,
-            updated_at: now,
-        },
-        Ok(None) => LightningSweepRecord {
-            id: Uuid::new_v4(),
-            store_id: store_id.clone(),
-            backend: sweep_cfg.backend.as_str().to_string(),
-            status: SweepStatus::Skipped,
-            balance_sats: 0,
-            amount_sats: 0,
-            address: destination,
-            tx_id: None,
-            error: None,
-            created_at: now,
-            updated_at: now,
-        },
-        Err(error) => LightningSweepRecord {
-            id: Uuid::new_v4(),
-            store_id: store_id.clone(),
-            backend: sweep_cfg.backend.as_str().to_string(),
-            status: SweepStatus::Failed,
-            balance_sats: 0,
-            amount_sats: 0,
-            address: destination,
-            tx_id: None,
-            error: Some(error.to_string()),
-            created_at: now,
-            updated_at: now,
-        },
-    };
+    let record =
+        match crate::lightning::sweep_to_address(&payout_cfg, sweep_cfg, destination.clone()).await
+        {
+            Ok(Some(result)) => LightningSweepRecord {
+                id: Uuid::new_v4(),
+                store_id: store_id.clone(),
+                backend: payout_cfg.backend.as_str().to_string(),
+                status: SweepStatus::Succeeded,
+                balance_sats: result.balance_sats,
+                amount_sats: result.amount_sats,
+                address: result.address,
+                tx_id: result.tx_id,
+                error: None,
+                created_at: now,
+                updated_at: now,
+            },
+            Ok(None) => LightningSweepRecord {
+                id: Uuid::new_v4(),
+                store_id: store_id.clone(),
+                backend: payout_cfg.backend.as_str().to_string(),
+                status: SweepStatus::Skipped,
+                balance_sats: 0,
+                amount_sats: 0,
+                address: destination,
+                tx_id: None,
+                error: None,
+                created_at: now,
+                updated_at: now,
+            },
+            Err(error) => LightningSweepRecord {
+                id: Uuid::new_v4(),
+                store_id: store_id.clone(),
+                backend: payout_cfg.backend.as_str().to_string(),
+                status: SweepStatus::Failed,
+                balance_sats: 0,
+                amount_sats: 0,
+                address: destination,
+                tx_id: None,
+                error: Some(error.to_string()),
+                created_at: now,
+                updated_at: now,
+            },
+        };
     state.store.insert_lightning_sweep(&record).await?;
     if record.status == SweepStatus::Failed {
         return Err(ApiError::bad_gateway(
@@ -965,7 +973,7 @@ async fn list_lightning_sweeps(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_admin(store_cfg, &headers)?;
+    authorize_admin(&state.config.auth, store_cfg, &headers)?;
     Ok(Json(
         state
             .store
@@ -983,7 +991,7 @@ async fn get_event(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_admin(store_cfg, &headers)?;
+    authorize_admin(&state.config.auth, store_cfg, &headers)?;
 
     let event = state
         .store
@@ -1002,7 +1010,7 @@ async fn replay_event(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_admin(store_cfg, &headers)?;
+    authorize_admin(&state.config.auth, store_cfg, &headers)?;
     let url = store_cfg
         .webhook_url
         .as_deref()
@@ -1028,7 +1036,7 @@ async fn get_invoice(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_admin(store_cfg, &headers)?;
+    authorize_admin(&state.config.auth, store_cfg, &headers)?;
 
     let invoice = state
         .store
@@ -1042,22 +1050,28 @@ async fn get_invoice(
     )))
 }
 
-fn authorize_api(store: &crate::config::StoreConfig, headers: &HeaderMap) -> Result<(), ApiError> {
-    authorize_with_token(&store.api_token()?, headers)
+fn authorize_api(
+    auth: &crate::config::AuthConfig,
+    store: &crate::config::StoreConfig,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    authorize_with_token(&store.api_token(auth)?, headers)
 }
 
 fn authorize_admin(
+    auth: &crate::config::AuthConfig,
     store: &crate::config::StoreConfig,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
-    authorize_with_token(&store.admin_token()?, headers)
+    authorize_with_token(&store.admin_token(auth)?, headers)
 }
 
-fn authorize_refund(
+fn authorize_payout(
+    auth: &crate::config::AuthConfig,
     store: &crate::config::StoreConfig,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
-    authorize_with_token(&store.refund_token()?, headers)
+    authorize_with_token(&store.payout_token(auth)?, headers)
 }
 
 fn authorize_with_token(expected: &str, headers: &HeaderMap) -> Result<(), ApiError> {
@@ -1914,17 +1928,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refund_token_env_scopes_refund_mutations() {
+    async fn payout_token_env_scopes_refund_mutations() {
         // SAFETY: this test uses fixed values and does not depend on concurrent
         // mutation of the same environment variables.
         unsafe {
             std::env::set_var("QPAYD_MAIN_API_TOKEN", "test-token");
             std::env::set_var("QPAYD_MAIN_ADMIN_TOKEN", "admin-token");
-            std::env::set_var("QPAYD_MAIN_REFUND_TOKEN", "refund-token");
+            std::env::set_var("QPAYD_MAIN_PAYOUT_TOKEN", "payout-token");
         }
         let mut config = test_config();
         config.stores[0].admin_token_env = Some("QPAYD_MAIN_ADMIN_TOKEN".to_string());
-        config.stores[0].refund_token_env = Some("QPAYD_MAIN_REFUND_TOKEN".to_string());
+        config.stores[0].payout_token_env = Some("QPAYD_MAIN_PAYOUT_TOKEN".to_string());
         let (app, store) = test_app_and_store_with_config(config).await;
 
         let created = app
@@ -1979,7 +1993,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/v1/stores/main/invoices/{invoice_id}/refunds"))
-                    .header(header::AUTHORIZATION, "Bearer refund-token")
+                    .header(header::AUTHORIZATION, "Bearer payout-token")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"amount_sats":2000}"#))
                     .unwrap(),
