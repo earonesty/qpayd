@@ -113,6 +113,11 @@ treasury descriptor, leaving `target_balance_sats` on the Lightning backend.
 Use a limited Phoenixd password for invoice creation and a separate full-access
 password only for sweeping.
 
+Barkd uses the same sweep configuration. qpayd checks Barkd spendable Ark
+balance and calls Barkd `send-onchain` for the amount above `target_balance_sats`.
+Use a separate `full_api_password_env` name for sweep. It may point at the same
+Barkd token value, but the config boundary should stay explicit.
+
 Run a manual sweep check with:
 
 ```sh
@@ -130,6 +135,7 @@ export PHOENIXD_LIMITED_PASSWORD="$(openssl rand -hex 32)"
 export PHOENIXD_FULL_PASSWORD="$(openssl rand -hex 32)"
 # If using barkd instead of Phoenixd:
 export BARKD_AUTH_TOKEN="$(barkd --datadir /var/lib/barkd secret show)"
+export BARKD_SWEEP_AUTH_TOKEN="$BARKD_AUTH_TOKEN"
 ```
 
 ## Link A Bitcoin Wallet
