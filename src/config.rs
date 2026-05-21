@@ -354,9 +354,6 @@ impl Config {
             }
             let mut hot_wallet_ids = HashSet::new();
             for hot_wallet in &store.hot_wallets {
-                if !hot_wallet.enabled {
-                    continue;
-                }
                 if hot_wallet.id.trim().is_empty() {
                     bail!("store {} hot_wallet id cannot be empty", store.id);
                 }
@@ -366,6 +363,9 @@ impl Config {
                         store.id,
                         hot_wallet.id
                     );
+                }
+                if !hot_wallet.enabled {
+                    continue;
                 }
                 if hot_wallet.url.trim().is_empty() {
                     bail!(
@@ -1135,6 +1135,52 @@ mod tests {
             [[stores.hot_wallets]]
             id = "refunds"
             enabled = true
+            refund_execution_enabled = false
+            backend = "bitcoind"
+            url = "http://127.0.0.1:8332"
+            full_api_password_env = "BITCOIND_REFUND_PASSWORD"
+            max_refund_sats = 100000
+            daily_refund_limit_sats = 500000
+            allowed_refund_destination_types = ["bitcoin_address"]
+            "#,
+        )
+        .unwrap();
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("duplicate hot_wallet id"));
+    }
+
+    #[test]
+    fn rejects_disabled_duplicate_hot_wallet_ids_per_store() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.lightning]
+            backend = "barkd"
+            url = "http://127.0.0.1:3000"
+            api_password_env = "BARKD_AUTH_TOKEN"
+
+            [[stores.hot_wallets]]
+            id = "refunds"
+            enabled = false
+            refund_execution_enabled = false
+            backend = "barkd"
+            url = "http://127.0.0.1:3000"
+            full_api_password_env = "BARKD_FULL_AUTH_TOKEN"
+            max_refund_sats = 100000
+            daily_refund_limit_sats = 500000
+            allowed_refund_destination_types = ["lightning_invoice"]
+
+            [[stores.hot_wallets]]
+            id = "refunds"
+            enabled = false
             refund_execution_enabled = false
             backend = "bitcoind"
             url = "http://127.0.0.1:8332"
