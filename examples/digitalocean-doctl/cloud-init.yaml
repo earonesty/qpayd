@@ -1,0 +1,10 @@
+#cloud-config
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - docker.io
+  - docker-compose-plugin
+runcmd:
+  - systemctl enable --now docker
+  - mkdir -p /opt/qpayd

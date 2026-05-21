@@ -1,0 +1,33 @@
+services:
+  qpayd:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      QPAYD_MIGRATE_ON_BOOT: "true"
+      RUST_LOG: "qpayd=info,tower_http=info"
+    volumes:
+      - qpayd_data:/data
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - qpayd
+    env_file:
+      - .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  qpayd_data:
+  caddy_data:
+  caddy_config:

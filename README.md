@@ -82,8 +82,6 @@ Merchant admin panel:
 import { mountQPaydAdmin } from "@qpayd/admin";
 ```
 
-Both packages are published through npm trusted publishing from GitHub Actions.
-
 ## Docs
 
 Operator guides live in [`docs/`](docs/) and are rendered to the public site:
