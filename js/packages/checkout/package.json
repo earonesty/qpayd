@@ -12,7 +12,7 @@
   ],
   "scripts": {
     "check": "node --check src/index.js",
-    "test": "node --test"
+    "test": "node --test test/*.test.js"
   },
   "publishConfig": {
     "access": "public"

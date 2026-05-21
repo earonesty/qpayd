@@ -33,6 +33,54 @@ default. Pass `showErrors: false` to receive the thrown error directly.
 Backends can also create invoices with the qpayd admin API and pass the invoice
 JSON into `openInvoiceModal({ client, invoice })`.
 
+### Checkout modal styling
+
+The checkout modal injects its default stylesheet as `#qpayd-modal-styles`.
+Merchant CSS loaded after the modal opens can override the supported selectors
+below. Pass `className` to scope merchant overrides to a specific checkout
+instance:
+
+```js
+openInvoiceModal({
+  client,
+  invoice,
+  className: "merchant-checkout"
+});
+```
+
+Supported checkout styling classes:
+
+- `.qpayd-modal-root`
+- `.qpayd-backdrop`
+- `.qpayd-modal`
+- `.qpayd-head`
+- `.qpayd-summary`
+- `.qpayd-tabs`
+- `.qpayd-panel`
+- `.qpayd-value`
+- `.qpayd-actions`
+- `.qpayd-note`
+- `.qpayd-error`
+- `.qpayd-error-panel`
+
+Supported state and behavior attributes for scoped styling:
+
+- `[data-qpayd-close]`
+- `[data-qpayd-copy]`
+- `[data-qpayd-error]`
+- `[data-qpayd-expiry]`
+- `[data-qpayd-fiat]`
+- `[data-qpayd-method]`
+- `[data-qpayd-panel]`
+- `[data-qpayd-qr]`
+- `[data-qpayd-sats]`
+- `[data-qpayd-status]`
+- `[data-qpayd-uri]`
+- `[data-qpayd-value]`
+- `[data-status]`
+
+Other modal markup is internal and may change between releases.
+
 The modal is customer UX only. Fulfill orders from qpayd signed webhooks.
 
 ## @qpayd/admin

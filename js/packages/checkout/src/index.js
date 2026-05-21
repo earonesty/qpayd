@@ -99,6 +99,7 @@ export function openInvoiceModal(options) {
 
   const root = document.createElement("div");
   root.className = "qpayd-modal-root";
+  addHostClassNames(root, options.className);
   root.innerHTML = modalHtml(state.invoice);
   document.body.append(root);
 
@@ -184,6 +185,14 @@ function openCheckoutErrorModal(error) {
     error,
     element: root
   };
+}
+
+function addHostClassNames(element, className) {
+  if (!className) return;
+  String(className)
+    .split(/\s+/)
+    .filter(Boolean)
+    .forEach((name) => element.classList.add(name));
 }
 
 async function poll(root, state) {
