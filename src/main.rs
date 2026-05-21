@@ -5,6 +5,7 @@ mod http;
 mod invoice;
 mod lightning;
 mod onchain;
+mod payout;
 mod pricing;
 mod storage;
 mod webhook;
