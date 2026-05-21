@@ -28,6 +28,16 @@ backend = "phoenixd"
 url = "http://127.0.0.1:9740"
 api_password_env = "PHOENIXD_LIMITED_PASSWORD"
 
+# Barkd can be used instead of Phoenixd:
+#
+# [stores.lightning]
+# backend = "barkd"
+# url = "http://127.0.0.1:3000"
+# api_password_env = "BARKD_AUTH_TOKEN"
+#
+# Get the token from barkd with:
+# barkd --datadir /var/lib/barkd secret show
+
 [stores.lightning_sweep]
 backend = "phoenixd"
 url = "http://127.0.0.1:9740"

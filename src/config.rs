@@ -106,6 +106,7 @@ pub struct LightningSweepConfig {
 #[serde(rename_all = "snake_case")]
 pub enum LightningBackend {
     Phoenixd,
+    Barkd,
 }
 
 impl Config {
@@ -206,16 +207,24 @@ impl Config {
                 if lightning.url.trim().is_empty() {
                     bail!("store {} lightning url cannot be empty", store.id);
                 }
-                if matches!(lightning.backend, LightningBackend::Phoenixd)
-                    && lightning.api_password_env.is_none()
-                {
-                    bail!("store {} phoenixd requires api_password_env", store.id);
+                if lightning.api_password_env.is_none() {
+                    bail!(
+                        "store {} {:?} requires api_password_env",
+                        store.id,
+                        lightning.backend
+                    );
                 }
             }
             if let Some(sweep) = &store.lightning_sweep {
                 if store.lightning.is_none() {
                     bail!(
                         "store {} lightning_sweep requires lightning config",
+                        store.id
+                    );
+                }
+                if !matches!(sweep.backend, LightningBackend::Phoenixd) {
+                    bail!(
+                        "store {} lightning_sweep currently supports phoenixd only",
                         store.id
                     );
                 }
@@ -537,6 +546,58 @@ mod tests {
             backend = "phoenixd"
             url = "http://127.0.0.1:9740"
             full_api_password_env = "PHOENIXD_PASSWORD"
+            destination_descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            "#,
+        )
+        .unwrap();
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validates_barkd_lightning_backend() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.lightning]
+            backend = "barkd"
+            url = "http://127.0.0.1:3000"
+            api_password_env = "BARKD_AUTH_TOKEN"
+            "#,
+        )
+        .unwrap();
+
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_barkd_lightning_sweep_backend() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.lightning]
+            backend = "barkd"
+            url = "http://127.0.0.1:3000"
+            api_password_env = "BARKD_AUTH_TOKEN"
+
+            [stores.lightning_sweep]
+            backend = "barkd"
+            url = "http://127.0.0.1:3000"
+            full_api_password_env = "BARKD_AUTH_TOKEN"
             destination_descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
             "#,
         )
