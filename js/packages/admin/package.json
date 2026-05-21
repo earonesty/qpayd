@@ -1,6 +1,6 @@
 {
   "name": "@qpayd/admin",
-  "version": "0.5.0",
+  "version": "0.6.1",
   "description": "Browser admin panel for qpayd merchant operations.",
   "repository": {
     "type": "git",
