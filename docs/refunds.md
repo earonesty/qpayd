@@ -87,7 +87,6 @@ max_refund_sats = 100000
 daily_refund_limit_sats = 500000
 manual_approval_threshold_sats = 250000
 refund_poll_seconds = 30
-allowed_refund_destination_types = ["lightning_invoice", "lnurl"]
 
 [[stores.hot_wallets]]
 id = "bitcoin-refunds"
@@ -100,8 +99,11 @@ max_refund_sats = 100000
 daily_refund_limit_sats = 500000
 manual_approval_threshold_sats = 250000
 refund_poll_seconds = 30
-allowed_refund_destination_types = ["bitcoin_address", "bitcoin_uri"]
 ```
+
+When refund execution is released, qpayd will ask each configured refund backend
+whether it can handle the refund destination. The first matching backend will
+execute the refund.
 
 Keep `refund_execution_enabled = false` until refund execution is released, and
 continue finalizing or failing refunds manually. Backend-specific wallet

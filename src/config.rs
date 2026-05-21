@@ -5,8 +5,6 @@ use reqwest::Url;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
-use crate::invoice::RefundDestinationType;
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -135,8 +133,6 @@ pub struct HotWalletConfig {
     pub max_refund_sats: u64,
     pub daily_refund_limit_sats: u64,
     pub manual_approval_threshold_sats: Option<u64>,
-    #[serde(default)]
-    pub allowed_refund_destination_types: Vec<RefundDestinationType>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,22 +165,6 @@ impl HotWalletBackend {
             Self::Phoenixd => "phoenixd",
             Self::Barkd => "barkd",
             Self::Bitcoind => "bitcoind",
-        }
-    }
-
-    pub fn supports_refund_destination_type(
-        &self,
-        destination_type: RefundDestinationType,
-    ) -> bool {
-        match self {
-            Self::Phoenixd | Self::Barkd => matches!(
-                destination_type,
-                RefundDestinationType::LightningInvoice | RefundDestinationType::Lnurl
-            ),
-            Self::Bitcoind => matches!(
-                destination_type,
-                RefundDestinationType::BitcoinAddress | RefundDestinationType::BitcoinUri
-            ),
         }
     }
 }
@@ -555,25 +535,6 @@ fn validate_hot_wallet_refunds(store_id: &str, hot_wallet: &HotWalletConfig) -> 
             hot_wallet.id
         );
     }
-    if hot_wallet.allowed_refund_destination_types.is_empty() {
-        bail!(
-            "store {store_id} hot_wallet {} allowed_refund_destination_types cannot be empty",
-            hot_wallet.id
-        );
-    }
-    for destination_type in &hot_wallet.allowed_refund_destination_types {
-        if !hot_wallet
-            .backend
-            .supports_refund_destination_type(*destination_type)
-        {
-            bail!(
-                "store {store_id} hot_wallet {} backend {} cannot execute {} refunds",
-                hot_wallet.id,
-                hot_wallet.backend.as_str(),
-                destination_type.as_str()
-            );
-        }
-    }
     Ok(())
 }
 
@@ -660,7 +621,6 @@ fn validate_script_integrity(integrity: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{Config, HotWalletBackend, HotWalletConfig, validate_hot_wallet_refunds};
-    use crate::invoice::RefundDestinationType;
 
     #[test]
     fn validates_public_payment_links() {
@@ -926,7 +886,6 @@ mod tests {
             max_refund_sats = 100000
             daily_refund_limit_sats = 500000
             manual_approval_threshold_sats = 250000
-            allowed_refund_destination_types = ["lightning_invoice", "lnurl"]
             "#,
         )
         .unwrap();
@@ -960,7 +919,6 @@ mod tests {
             full_api_password_env = "BARKD_FULL_AUTH_TOKEN"
             max_refund_sats = 100000
             daily_refund_limit_sats = 500000
-            allowed_refund_destination_types = ["lightning_invoice", "lnurl"]
 
             [[stores.hot_wallets]]
             id = "bitcoin-refunds"
@@ -971,7 +929,6 @@ mod tests {
             full_api_password_env = "BITCOIND_REFUND_PASSWORD"
             max_refund_sats = 100000
             daily_refund_limit_sats = 500000
-            allowed_refund_destination_types = ["bitcoin_address", "bitcoin_uri"]
             "#,
         )
         .unwrap();
@@ -1005,7 +962,6 @@ mod tests {
             full_api_password_env = "BARKD_FULL_AUTH_TOKEN"
             max_refund_sats = 100000
             daily_refund_limit_sats = 50000
-            allowed_refund_destination_types = ["lightning_invoice"]
             "#,
         )
         .unwrap();
@@ -1059,17 +1015,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_hot_wallet_allowed_refund_destination_types() {
-        let mut hot_wallet = valid_hot_wallet_refund_config();
-        hot_wallet.allowed_refund_destination_types.clear();
-
-        let error = validate_hot_wallet_refunds("main", &hot_wallet)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("allowed_refund_destination_types"));
-    }
-
-    #[test]
     fn rejects_shared_lightning_invoice_and_hot_wallet_secret_env() {
         let config: Config = toml::from_str(
             r#"
@@ -1095,7 +1040,6 @@ mod tests {
             full_api_password_env = "BARKD_AUTH_TOKEN"
             max_refund_sats = 100000
             daily_refund_limit_sats = 500000
-            allowed_refund_destination_types = ["lightning_invoice"]
             "#,
         )
         .unwrap();
@@ -1130,7 +1074,6 @@ mod tests {
             full_api_password_env = "BARKD_FULL_AUTH_TOKEN"
             max_refund_sats = 100000
             daily_refund_limit_sats = 500000
-            allowed_refund_destination_types = ["lightning_invoice"]
 
             [[stores.hot_wallets]]
             id = "refunds"
@@ -1141,7 +1084,6 @@ mod tests {
             full_api_password_env = "BITCOIND_REFUND_PASSWORD"
             max_refund_sats = 100000
             daily_refund_limit_sats = 500000
-            allowed_refund_destination_types = ["bitcoin_address"]
             "#,
         )
         .unwrap();
@@ -1176,7 +1118,6 @@ mod tests {
             full_api_password_env = "BARKD_FULL_AUTH_TOKEN"
             max_refund_sats = 100000
             daily_refund_limit_sats = 500000
-            allowed_refund_destination_types = ["lightning_invoice"]
 
             [[stores.hot_wallets]]
             id = "refunds"
@@ -1187,24 +1128,12 @@ mod tests {
             full_api_password_env = "BITCOIND_REFUND_PASSWORD"
             max_refund_sats = 100000
             daily_refund_limit_sats = 500000
-            allowed_refund_destination_types = ["bitcoin_address"]
             "#,
         )
         .unwrap();
 
         let error = config.validate().unwrap_err().to_string();
         assert!(error.contains("duplicate hot_wallet id"));
-    }
-
-    #[test]
-    fn rejects_hot_wallet_destination_types_not_supported_by_backend() {
-        let mut hot_wallet = valid_hot_wallet_refund_config();
-        hot_wallet.backend = HotWalletBackend::Bitcoind;
-
-        let error = validate_hot_wallet_refunds("main", &hot_wallet)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("cannot execute lightning_invoice refunds"));
     }
 
     fn valid_hot_wallet_refund_config() -> HotWalletConfig {
@@ -1219,10 +1148,6 @@ mod tests {
             max_refund_sats: 100_000,
             daily_refund_limit_sats: 500_000,
             manual_approval_threshold_sats: Some(250_000),
-            allowed_refund_destination_types: vec![
-                RefundDestinationType::LightningInvoice,
-                RefundDestinationType::Lnurl,
-            ],
         }
     }
 }

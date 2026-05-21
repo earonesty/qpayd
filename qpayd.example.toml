@@ -80,7 +80,6 @@ interval_seconds = 3600
 # daily_refund_limit_sats = 500000
 # manual_approval_threshold_sats = 250000
 # refund_poll_seconds = 30
-# allowed_refund_destination_types = ["lightning_invoice", "lnurl"]
 #
 # [[stores.hot_wallets]]
 # id = "bitcoin-refunds"
@@ -93,4 +92,3 @@ interval_seconds = 3600
 # daily_refund_limit_sats = 500000
 # manual_approval_threshold_sats = 250000
 # refund_poll_seconds = 30
-# allowed_refund_destination_types = ["bitcoin_address", "bitcoin_uri"]
