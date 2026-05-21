@@ -45,6 +45,8 @@ pub struct StoreConfig {
     pub api_token_env: String,
     #[serde(default)]
     pub public_allowed_origins: Vec<String>,
+    #[serde(default)]
+    pub admin_allowed_origins: Vec<String>,
     pub webhook_url: Option<String>,
     pub webhook_secret_env: Option<String>,
     #[serde(default)]
@@ -157,6 +159,10 @@ impl Config {
             validate_public_allowed_origins(
                 &format!("store {} public_allowed_origins", store.id),
                 &store.public_allowed_origins,
+            )?;
+            validate_public_allowed_origins(
+                &format!("store {} admin_allowed_origins", store.id),
+                &store.admin_allowed_origins,
             )?;
             if store.onchain.is_none() && store.lightning.is_none() {
                 bail!("store {} has no payment methods", store.id);

@@ -31,3 +31,35 @@ Backends can also create invoices with the qpayd admin API and pass the invoice
 JSON into `openInvoiceModal({ client, invoice })`.
 
 The modal is customer UX only. Fulfill orders from qpayd signed webhooks.
+
+## Admin Panel
+
+The admin panel is a browser-only UI that talks directly to the qpayd admin API.
+Configure the qpayd base URL and store id when mounting it; the login form asks
+for the store API token.
+
+```html
+<main id="qpayd-admin"></main>
+<script type="module">
+  import { mountQPaydAdmin } from "@qpayd/js/admin";
+
+  mountQPaydAdmin("#qpayd-admin", {
+    baseUrl: "https://pay.example.com",
+    storeId: "main"
+  });
+</script>
+```
+
+Set `admin_allowed_origins` for the store in qpayd config when hosting the
+admin panel on a different browser origin than the API:
+
+```toml
+[[stores]]
+id = "main"
+admin_allowed_origins = ["https://admin.example.com"]
+```
+
+The panel lists invoices, opens invoice details, creates invoice-scoped refund
+records, scans QR codes for refund destinations, cancels pending refunds, and
+finalizes refunds after an operator sends funds from the wallet or Lightning
+node that controls them.

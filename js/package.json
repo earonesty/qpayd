@@ -1,16 +1,22 @@
 {
   "name": "@qpayd/js",
-  "version": "0.3.0",
-  "description": "Browser client and modal checkout UI for qpayd.",
+  "version": "0.4.0",
+  "description": "Browser checkout and admin UI helpers for qpayd.",
   "type": "module",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.js",
+    "./admin": "./src/admin.js"
   },
   "files": [
-    "src"
+    "src",
+    "examples"
   ],
   "scripts": {
+    "check": "node --check src/index.js && node --check src/admin.js",
     "test": "node --test"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "license": "MIT"
 }

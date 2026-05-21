@@ -3,8 +3,9 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    extract::{Path, Query, Request, State},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
@@ -35,6 +36,7 @@ pub struct AppState {
 }
 
 pub fn router(state: AppState) -> Router {
+    let admin_cors_state = state.clone();
     Router::new()
         .route("/", get(index))
         .route("/healthz", get(healthz))
@@ -63,6 +65,14 @@ pub fn router(state: AppState) -> Router {
             get(get_invoice),
         )
         .route(
+            "/v1/stores/{store_id}/invoices/{invoice_id}/refund-summary",
+            get(get_invoice_refund_summary),
+        )
+        .route(
+            "/v1/stores/{store_id}/invoices/{invoice_id}/refunds",
+            get(list_invoice_refunds).post(create_invoice_refund),
+        )
+        .route(
             "/v1/stores/{store_id}/refunds",
             get(list_refunds).post(create_refund),
         )
@@ -70,6 +80,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/stores/{store_id}/refunds/{refund_id}/finalize",
             post(finalize_refund),
+        )
+        .route(
+            "/v1/stores/{store_id}/refunds/{refund_id}/cancel",
+            post(cancel_refund),
         )
         .route(
             "/v1/stores/{store_id}/lightning/balance",
@@ -86,6 +100,10 @@ pub fn router(state: AppState) -> Router {
             post(replay_event),
         )
         .with_state(state)
+        .layer(middleware::from_fn_with_state(
+            admin_cors_state,
+            admin_cors_middleware,
+        ))
 }
 
 async fn index() -> Html<&'static str> {
@@ -448,6 +466,35 @@ async fn create_refund(
     headers: HeaderMap,
     Json(request): Json<CreateRefundRequest>,
 ) -> Result<Json<Refund>, ApiError> {
+    let invoice_id = request
+        .invoice_id
+        .ok_or(ApiError::bad_request("invoice_id is required"))?;
+    create_refund_for_invoice(state, store_id, invoice_id, headers, request).await
+}
+
+async fn create_invoice_refund(
+    State(state): State<AppState>,
+    Path((store_id, invoice_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<CreateRefundRequest>,
+) -> Result<Json<Refund>, ApiError> {
+    if let Some(body_invoice_id) = request.invoice_id
+        && body_invoice_id != invoice_id
+    {
+        return Err(ApiError::bad_request(
+            "body invoice_id must match the invoice route",
+        ));
+    }
+    create_refund_for_invoice(state, store_id, invoice_id, headers, request).await
+}
+
+async fn create_refund_for_invoice(
+    state: AppState,
+    store_id: String,
+    invoice_id: Uuid,
+    headers: HeaderMap,
+    request: CreateRefundRequest,
+) -> Result<Json<Refund>, ApiError> {
     let store_cfg = state
         .config
         .store(&store_id)
@@ -455,10 +502,15 @@ async fn create_refund(
     authorize(store_cfg, &headers)?;
     let invoice = state
         .store
-        .invoice(&store_id, request.invoice_id)
+        .invoice(&store_id, invoice_id)
         .await?
         .ok_or(ApiError::not_found("invoice not found"))?;
-    let refundable_sats = invoice.paid_sats;
+    let refunds = state
+        .store
+        .refunds_for_invoice(&store_id, invoice.id)
+        .await?;
+    let summary = refund_summary(invoice.clone(), refunds, store_cfg.confirmations());
+    let refundable_sats = summary.refundable_sats;
     let amount_sats = request.amount_sats.unwrap_or(refundable_sats);
     if amount_sats == 0 {
         return Err(ApiError::bad_request(
@@ -492,6 +544,53 @@ async fn create_refund(
         .insert_refund(&refund, &event, store_cfg.webhook_url.as_deref())
         .await?;
     Ok(Json(refund))
+}
+
+async fn get_invoice_refund_summary(
+    State(state): State<AppState>,
+    Path((store_id, invoice_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<RefundSummaryResponse>, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    authorize(store_cfg, &headers)?;
+    let invoice = state
+        .store
+        .invoice(&store_id, invoice_id)
+        .await?
+        .ok_or(ApiError::not_found("invoice not found"))?;
+    let refunds = state
+        .store
+        .refunds_for_invoice(&store_id, invoice.id)
+        .await?;
+    Ok(Json(refund_summary(
+        invoice,
+        refunds,
+        store_cfg.confirmations(),
+    )))
+}
+
+async fn list_invoice_refunds(
+    State(state): State<AppState>,
+    Path((store_id, invoice_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Refund>>, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    authorize(store_cfg, &headers)?;
+    if state.store.invoice(&store_id, invoice_id).await?.is_none() {
+        return Err(ApiError::not_found("invoice not found"));
+    }
+    Ok(Json(
+        state
+            .store
+            .refunds_for_invoice(&store_id, invoice_id)
+            .await?,
+    ))
 }
 
 async fn list_refunds(
@@ -556,6 +655,37 @@ async fn finalize_refund(
     refund.updated_at = now;
     refund.finalized_at = Some(now);
     let event = events::refund_finalized_event(&refund, now);
+    state
+        .store
+        .update_refund_status(&refund, &event, store_cfg.webhook_url.as_deref())
+        .await?;
+    Ok(Json(refund))
+}
+
+async fn cancel_refund(
+    State(state): State<AppState>,
+    Path((store_id, refund_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<Refund>, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    authorize(store_cfg, &headers)?;
+    let mut refund = state
+        .store
+        .refund(&store_id, refund_id)
+        .await?
+        .ok_or(ApiError::not_found("refund not found"))?;
+    if refund.status != RefundStatus::Pending {
+        return Err(ApiError::bad_request(
+            "only pending refunds can be canceled",
+        ));
+    }
+    let now = Utc::now();
+    refund.status = RefundStatus::Canceled;
+    refund.updated_at = now;
+    let event = events::refund_canceled_event(&refund, now);
     state
         .store
         .update_refund_status(&refund, &event, store_cfg.webhook_url.as_deref())
@@ -856,6 +986,51 @@ fn public_cors_for_store(
     )
 }
 
+async fn admin_cors_middleware(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Some(store_id) = admin_store_id_from_path(request.uri().path()) else {
+        return next.run(request).await;
+    };
+    let cors = match admin_cors_for_store(&state.config, store_id, request.headers()) {
+        Ok(cors) => cors,
+        Err(error) => return error.into_response(),
+    };
+    if request.method() == Method::OPTIONS {
+        return preflight_response(cors);
+    }
+    let mut response = next.run(request).await;
+    add_public_cors_headers(response.headers_mut(), cors);
+    response
+}
+
+fn admin_store_id_from_path(path: &str) -> Option<&str> {
+    let mut parts = path.trim_start_matches('/').split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("v1"), Some("stores"), Some(store_id)) if !store_id.is_empty() => Some(store_id),
+        _ => None,
+    }
+}
+
+fn admin_cors_for_store(
+    config: &Config,
+    store_id: &str,
+    headers: &HeaderMap,
+) -> Result<PublicCors, ApiError> {
+    if headers.get(header::ORIGIN).is_none() {
+        return Ok(PublicCors::NoBrowserOrigin);
+    }
+    let store = config
+        .store(store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    if store.admin_allowed_origins.is_empty() {
+        return Err(ApiError::forbidden("admin origin is not allowed"));
+    }
+    public_cors_for_allowed_origins(&store.admin_allowed_origins, headers)
+}
+
 fn most_specific_allowed_origins<'a>(
     server: &'a [String],
     store: &'a [String],
@@ -931,7 +1106,7 @@ fn add_public_cors_headers(headers: &mut HeaderMap, cors: PublicCors) {
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("content-type,idempotency-key"),
+        HeaderValue::from_static("authorization,content-type,idempotency-key"),
     );
     headers.insert(
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
@@ -1001,7 +1176,7 @@ struct ListEventsQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateRefundRequest {
-    pub invoice_id: Uuid,
+    pub invoice_id: Option<Uuid>,
     pub amount_sats: Option<u64>,
     pub destination: Option<String>,
     pub reason: Option<String>,
@@ -1011,6 +1186,18 @@ pub struct CreateRefundRequest {
 #[derive(Debug, Deserialize)]
 pub struct FinalizeRefundRequest {
     pub tx_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RefundSummaryResponse {
+    pub invoice: InvoiceResponse,
+    pub refunds: Vec<Refund>,
+    pub paid_sats: u64,
+    pub already_refunded_sats: u64,
+    pub refundable_sats: u64,
+    pub overpaid_sats: u64,
+    pub pending_refund_sats: u64,
+    pub succeeded_refund_sats: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1096,6 +1283,36 @@ impl InvoiceResponse {
             created_at: invoice.created_at,
             updated_at: invoice.updated_at,
         }
+    }
+}
+
+fn refund_summary(
+    invoice: Invoice,
+    refunds: Vec<Refund>,
+    min_confirmations: u32,
+) -> RefundSummaryResponse {
+    let pending_refund_sats = refunds
+        .iter()
+        .filter(|refund| refund.status == RefundStatus::Pending)
+        .map(|refund| refund.amount_sats)
+        .sum();
+    let succeeded_refund_sats = refunds
+        .iter()
+        .filter(|refund| refund.status == RefundStatus::Succeeded)
+        .map(|refund| refund.amount_sats)
+        .sum();
+    let already_refunded_sats = pending_refund_sats + succeeded_refund_sats;
+    let paid_sats = invoice.paid_sats;
+    let overpaid_sats = paid_sats.saturating_sub(invoice.btc_amount_sats);
+    RefundSummaryResponse {
+        invoice: InvoiceResponse::new(invoice, min_confirmations),
+        refunds,
+        paid_sats,
+        already_refunded_sats,
+        refundable_sats: paid_sats.saturating_sub(already_refunded_sats),
+        overpaid_sats,
+        pending_refund_sats,
+        succeeded_refund_sats,
     }
 }
 
@@ -1256,6 +1473,7 @@ mod tests {
     use super::{AppState, router, sats_for};
     use crate::{
         config::Config,
+        invoice::PaymentAmounts,
         pricing::{Rate, RateSource},
         storage::{SqliteStore, Store},
     };
@@ -1398,6 +1616,188 @@ mod tests {
                 .unwrap();
         assert_eq!(listed.as_array().unwrap().len(), 1);
         assert_eq!(listed[0]["id"], created["id"]);
+    }
+
+    #[tokio::test]
+    async fn invoice_scoped_refunds_track_refundable_balance() {
+        // SAFETY: this test uses a single fixed value and does not depend on
+        // concurrent mutation of the same environment variable.
+        unsafe {
+            std::env::set_var("QPAYD_MAIN_API_TOKEN", "test-token");
+        }
+        let (app, store) = test_app_and_store().await;
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/stores/main/invoices")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"amount":"10.00","currency":"USD"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let created: serde_json::Value =
+            serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let invoice_id = uuid::Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+
+        store
+            .update_invoice_payment_amounts(
+                "main",
+                invoice_id,
+                PaymentAmounts {
+                    paid_sats: 12_000,
+                    confirmed_sats: 12_000,
+                    unconfirmed_sats: 0,
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+
+        let summary = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/stores/main/invoices/{invoice_id}/refund-summary"
+                    ))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(summary.status(), StatusCode::OK);
+        let summary: serde_json::Value =
+            serde_json::from_slice(&to_bytes(summary.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(summary["paid_sats"], 12_000);
+        assert_eq!(summary["overpaid_sats"], 2_000);
+        assert_eq!(summary["refundable_sats"], 12_000);
+
+        let refund = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/stores/main/invoices/{invoice_id}/refunds"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"amount_sats":2000,"destination":"bc1qrefund","reason":"overpayment"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(refund.status(), StatusCode::OK);
+        let refund: serde_json::Value =
+            serde_json::from_slice(&to_bytes(refund.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+
+        let too_much = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/stores/main/invoices/{invoice_id}/refunds"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"amount_sats":11000}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(too_much.status(), StatusCode::BAD_REQUEST);
+
+        let canceled = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/stores/main/refunds/{}/cancel",
+                        refund["id"].as_str().unwrap()
+                    ))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(canceled.status(), StatusCode::OK);
+        let canceled: serde_json::Value =
+            serde_json::from_slice(&to_bytes(canceled.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(canceled["status"], "canceled");
+
+        let summary = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/stores/main/invoices/{invoice_id}/refund-summary"
+                    ))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let summary: serde_json::Value =
+            serde_json::from_slice(&to_bytes(summary.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(summary["already_refunded_sats"], 0);
+        assert_eq!(summary["refundable_sats"], 12_000);
+    }
+
+    #[tokio::test]
+    async fn admin_cors_requires_configured_origin() {
+        let mut config = test_config();
+        config.stores[0].admin_allowed_origins = vec!["https://admin.example".to_string()];
+        let app = test_app_with_config(config).await;
+
+        let allowed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/v1/stores/main/invoices")
+                    .header(header::ORIGIN, "https://admin.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            allowed.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "https://admin.example"
+        );
+        assert!(
+            allowed.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS]
+                .to_str()
+                .unwrap()
+                .contains("authorization")
+        );
+
+        let rejected = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/v1/stores/main/invoices")
+                    .header(header::ORIGIN, "https://other.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -1682,7 +2082,7 @@ mod tests {
         );
         assert_eq!(
             allowed.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS],
-            "content-type,idempotency-key"
+            "authorization,content-type,idempotency-key"
         );
 
         let rejected = app
@@ -1704,13 +2104,24 @@ mod tests {
     }
 
     async fn test_app_with_config(config: Config) -> axum::Router {
+        test_app_and_store_with_config(config).await.0
+    }
+
+    async fn test_app_and_store() -> (axum::Router, Arc<SqliteStore>) {
+        test_app_and_store_with_config(test_config()).await
+    }
+
+    async fn test_app_and_store_with_config(config: Config) -> (axum::Router, Arc<SqliteStore>) {
         let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
         store.migrate().await.unwrap();
-        router(AppState {
+        let store = Arc::new(store);
+        let app_store: Arc<dyn Store> = store.clone();
+        let app = router(AppState {
             config: Arc::new(config),
-            store: Arc::new(store),
+            store: app_store,
             pricing: Arc::new(FixedRateSource),
-        })
+        });
+        (app, store)
     }
 
     fn test_config() -> Config {

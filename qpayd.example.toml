@@ -17,6 +17,7 @@ api_token_env = "QPAYD_MAIN_API_TOKEN"
 invoice_expiry_minutes = 15
 min_confirmations = 1
 # public_allowed_origins = ["https://example.com"]
+# admin_allowed_origins = ["https://admin.example.com"]
 
 [stores.onchain]
 network = "bitcoin"

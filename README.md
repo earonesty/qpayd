@@ -360,6 +360,16 @@ from any site. Set `public_allowed_origins` on `[server]`, `[[stores]]`, or a
 specific `[[stores.payment_links]]` to restrict browser calls by `Origin`.
 Server-side calls without an `Origin` header are still accepted.
 
+Admin browser calls use the store API token and are stricter. Set
+`admin_allowed_origins` on the store when hosting the admin panel on a different
+origin than qpayd:
+
+```toml
+[[stores]]
+id = "main"
+admin_allowed_origins = ["https://admin.example.com"]
+```
+
 Create an invoice from browser code:
 
 ```sh
@@ -444,14 +454,20 @@ curl -sS "https://pay.example.com/v1/stores/main/invoices?status=settled&limit=5
   -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN"
 ```
 
-Create and finalize a refund record:
+Read refund state for an invoice:
 
 ```sh
-curl -sS https://pay.example.com/v1/stores/main/refunds \
+curl -sS https://pay.example.com/v1/stores/main/invoices/$INVOICE_ID/refund-summary \
+  -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN"
+```
+
+Create and finalize an invoice-scoped refund record:
+
+```sh
+curl -sS https://pay.example.com/v1/stores/main/invoices/$INVOICE_ID/refunds \
   -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "invoice_id": "b8e2b1fd-1ef3-4b1c-bf1c-5a2d60cccb53",
     "amount_sats": 2000,
     "destination": "bc1q...",
     "reason": "overpayment"
@@ -465,9 +481,16 @@ curl -sS -X POST https://pay.example.com/v1/stores/main/refunds/$REFUND_ID/final
   -d '{ "tx_id": "..." }'
 ```
 
-Refund records emit `refund.created` and `refund.finalized` webhooks. qpayd
-does not spend on-chain funds; finalize a refund after the wallet or Lightning
-node that holds funds completes it.
+Refund records emit `refund.created`, `refund.finalized`, and
+`refund.canceled` webhooks. qpayd does not spend on-chain funds; finalize a
+refund after the wallet or Lightning node that holds funds completes it.
+
+Cancel a pending refund:
+
+```sh
+curl -sS -X POST https://pay.example.com/v1/stores/main/refunds/$REFUND_ID/cancel \
+  -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN"
+```
 
 Read Lightning hot balance and sweep history:
 
@@ -538,6 +561,7 @@ invoice.expired
 invoice.paid_late
 refund.created
 refund.finalized
+refund.canceled
 ```
 
 Webhook requests are signed with:
