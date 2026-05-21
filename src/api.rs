@@ -278,7 +278,7 @@ async fn build_invoice(
     currency: String,
     metadata: serde_json::Value,
     idempotency_key: Option<String>,
-) -> anyhow::Result<Invoice> {
+) -> Result<Invoice, ApiError> {
     let currency = currency.to_uppercase();
     let rate = state.pricing.btc_rate(&currency).await?;
     let btc_amount_sats = sats_for(amount, rate.value)?;
@@ -308,7 +308,13 @@ async fn build_invoice(
     };
     let lightning_invoice = match &store_cfg.lightning {
         Some(lightning) => Some(
-            crate::lightning::create_invoice(lightning, btc_amount_sats, "qpayd invoice").await?,
+            crate::lightning::create_invoice(lightning, btc_amount_sats, "qpayd invoice")
+                .await
+                .map_err(|error| {
+                    ApiError::bad_gateway(format!(
+                        "lightning backend failed to create invoice: {error}"
+                    ))
+                })?,
         ),
         None => None,
     };
@@ -355,7 +361,7 @@ async fn build_invoice(
         {
             return Ok(existing);
         }
-        return Err(error);
+        return Err(error.into());
     }
 
     Ok(invoice)
@@ -866,6 +872,13 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    fn bad_gateway(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            message: message.into(),
+        }
+    }
 }
 
 impl From<anyhow::Error> for ApiError {
@@ -995,6 +1008,54 @@ mod tests {
         assert_eq!(
             second["onchain_address_index"],
             first["onchain_address_index"]
+        );
+    }
+
+    #[tokio::test]
+    async fn create_invoice_surfaces_lightning_backend_failure() {
+        // SAFETY: this test uses fixed values and does not depend on concurrent
+        // mutation of the same environment variables.
+        unsafe {
+            std::env::set_var("QPAYD_MAIN_API_TOKEN", "test-token");
+            std::env::set_var("QPAYD_TEST_LIGHTNING_PASSWORD", "test-password");
+        }
+        let mut config = test_config();
+        config.stores[0].onchain = None;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((socket, _)) = listener.accept().await {
+                drop(socket);
+            }
+        });
+        config.stores[0].lightning = Some(crate::config::LightningConfig {
+            backend: crate::config::LightningBackend::Phoenixd,
+            url: format!("http://{addr}"),
+            api_password_env: Some("QPAYD_TEST_LIGHTNING_PASSWORD".to_string()),
+        });
+        let app = test_app_with_config(config).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/stores/main/invoices")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"amount":"10.00","currency":"USD"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("lightning backend failed to create invoice")
         );
     }
 

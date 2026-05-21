@@ -24,6 +24,9 @@ from a configured public payment link:
 Pass a stable `idempotencyKey` for the checkout attempt so browser retries
 return the same qpayd invoice.
 
+If invoice creation fails, `openPaymentLink` shows a small error modal by
+default. Pass `showErrors: false` to receive the thrown error directly.
+
 Backends can also create invoices with the qpayd admin API and pass the invoice
 JSON into `openInvoiceModal({ client, invoice })`.
 
