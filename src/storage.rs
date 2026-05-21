@@ -24,7 +24,6 @@ pub struct InvoiceListFilter {
     pub limit: u32,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RefundExecutionCandidate {
     pub refund: Refund,
@@ -125,14 +124,12 @@ pub trait Store: Send + Sync {
         store_id: &str,
         invoice_id: Uuid,
     ) -> anyhow::Result<Vec<Refund>>;
-    #[allow(dead_code)]
     async fn pending_refund_executions(
         &self,
         store_id: &str,
         limit: u32,
         now: DateTime<Utc>,
     ) -> anyhow::Result<Vec<RefundExecutionCandidate>>;
-    #[allow(dead_code)]
     async fn claim_refund_execution(
         &self,
         store_id: &str,
@@ -141,6 +138,14 @@ pub trait Store: Send + Sync {
         lease_until: DateTime<Utc>,
         now: DateTime<Utc>,
     ) -> anyhow::Result<Option<RefundExecutionCandidate>>;
+    async fn try_start_refund_execution(
+        &self,
+        refund: &Refund,
+        day_start: DateTime<Utc>,
+        daily_limit_sats: u64,
+        event: &EventEnvelope,
+        webhook_url: Option<&str>,
+    ) -> anyhow::Result<bool>;
     async fn update_refund_approval(
         &self,
         refund: &Refund,
@@ -970,6 +975,62 @@ impl Store for SqliteStore {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    async fn try_start_refund_execution(
+        &self,
+        refund: &Refund,
+        day_start: DateTime<Utc>,
+        daily_limit_sats: u64,
+        event: &EventEnvelope,
+        webhook_url: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let updated = sqlx::query(
+            r#"
+            UPDATE refunds
+            SET status = 'processing', failure_reason = NULL, updated_at = ?, finalized_at = NULL
+            WHERE store_id = ? AND id = ? AND status = 'pending'
+            "#,
+        )
+        .bind(refund.updated_at.to_rfc3339())
+        .bind(&refund.store_id)
+        .bind(refund.id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() == 0 {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        let row = sqlx::query(
+            r#"
+            SELECT COALESCE(SUM(amount_sats), 0) AS total_sats
+            FROM refunds
+            WHERE store_id = ?
+              AND (
+                (status = 'succeeded' AND finalized_at IS NOT NULL AND finalized_at >= ?)
+                OR (status = 'processing' AND updated_at >= ?)
+              )
+            "#,
+        )
+        .bind(&refund.store_id)
+        .bind(day_start.to_rfc3339())
+        .bind(day_start.to_rfc3339())
+        .fetch_one(&mut *tx)
+        .await?;
+        let reserved = row.get::<i64, _>("total_sats") as u64;
+        if reserved > daily_limit_sats {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        insert_event_query(event).execute(&mut *tx).await?;
+        if let Some(url) = webhook_url {
+            enqueue_webhook_query(&event.id, &event.store_id, url, event.created_at)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
     }
 
     async fn update_refund_approval(
@@ -1831,6 +1892,67 @@ impl Store for PostgresStore {
         Ok(())
     }
 
+    async fn try_start_refund_execution(
+        &self,
+        refund: &Refund,
+        day_start: DateTime<Utc>,
+        daily_limit_sats: u64,
+        event: &EventEnvelope,
+        webhook_url: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(&refund.store_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let updated = sqlx::query(
+            r#"
+            UPDATE qpayd_refunds
+            SET status = 'processing', failure_reason = NULL, updated_at = $1, finalized_at = NULL
+            WHERE store_id = $2 AND id = $3 AND status = 'pending'
+            "#,
+        )
+        .bind(refund.updated_at.to_rfc3339())
+        .bind(&refund.store_id)
+        .bind(refund.id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() == 0 {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        let row = sqlx::query(
+            r#"
+            SELECT COALESCE(SUM(amount_sats), 0)::BIGINT AS total_sats
+            FROM qpayd_refunds
+            WHERE store_id = $1
+              AND (
+                (status = 'succeeded' AND finalized_at IS NOT NULL AND finalized_at >= $2)
+                OR (status = 'processing' AND updated_at >= $3)
+              )
+            "#,
+        )
+        .bind(&refund.store_id)
+        .bind(day_start.to_rfc3339())
+        .bind(day_start.to_rfc3339())
+        .fetch_one(&mut *tx)
+        .await?;
+        let reserved = row.get::<i64, _>("total_sats") as u64;
+        if reserved > daily_limit_sats {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        insert_pg_event_query(event).execute(&mut *tx).await?;
+        if let Some(url) = webhook_url {
+            enqueue_pg_webhook_query(&event.id, &event.store_id, url, event.created_at)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
     async fn update_refund_approval(
         &self,
         refund: &Refund,
@@ -2649,7 +2771,6 @@ fn refund_from_pg_row(row: sqlx::postgres::PgRow) -> anyhow::Result<Refund> {
     )
 }
 
-#[allow(dead_code)]
 fn refund_execution_candidate_from_row(
     row: sqlx::sqlite::SqliteRow,
 ) -> anyhow::Result<RefundExecutionCandidate> {
@@ -2659,7 +2780,6 @@ fn refund_execution_candidate_from_row(
     })
 }
 
-#[allow(dead_code)]
 fn refund_execution_candidate_from_pg_row(
     row: sqlx::postgres::PgRow,
 ) -> anyhow::Result<RefundExecutionCandidate> {
@@ -2669,7 +2789,6 @@ fn refund_execution_candidate_from_pg_row(
     })
 }
 
-#[allow(dead_code)]
 fn refund_from_aliased_fields(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Refund> {
     refund_from_fields(
         row.get("refund_id"),
@@ -2692,7 +2811,6 @@ fn refund_from_aliased_fields(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<R
     )
 }
 
-#[allow(dead_code)]
 fn refund_from_aliased_pg_fields(row: &sqlx::postgres::PgRow) -> anyhow::Result<Refund> {
     refund_from_fields(
         row.get("refund_id"),
@@ -2715,7 +2833,6 @@ fn refund_from_aliased_pg_fields(row: &sqlx::postgres::PgRow) -> anyhow::Result<
     )
 }
 
-#[allow(dead_code)]
 fn invoice_from_aliased_fields(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Invoice> {
     invoice_from_fields(
         row.get("invoice_id"),
@@ -2743,7 +2860,6 @@ fn invoice_from_aliased_fields(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<
     )
 }
 
-#[allow(dead_code)]
 fn invoice_from_aliased_pg_fields(row: &sqlx::postgres::PgRow) -> anyhow::Result<Invoice> {
     invoice_from_fields(
         row.get("invoice_id"),
@@ -2772,7 +2888,6 @@ fn invoice_from_aliased_pg_fields(row: &sqlx::postgres::PgRow) -> anyhow::Result
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 fn invoice_from_fields(
     id: String,
     store_id: String,
@@ -3045,6 +3160,12 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refund_execution_start_reserves_daily_limit() {
+        let store = test_store().await;
+        refund_execution_start_reserves_daily_limit_for(store.as_ref()).await;
+    }
+
+    #[tokio::test]
     async fn sqlite_migrate_records_initial_schema_once() {
         let path = std::env::temp_dir().join(format!("qpayd-migration-test-{}.db", Uuid::new_v4()));
         let store = SqliteStore::connect(&format!("sqlite://{}", path.display()))
@@ -3147,6 +3268,9 @@ mod tests {
 
         clean_pg_store(&store).await;
         refund_execution_claims_are_leased_for(&store).await;
+
+        clean_pg_store(&store).await;
+        refund_execution_start_reserves_daily_limit_for(&store).await;
     }
 
     async fn insert_invoice_persists_event_and_webhook_delivery_for(store: &dyn Store) {
@@ -3567,6 +3691,66 @@ mod tests {
         assert!(reclaimed.is_some());
     }
 
+    async fn refund_execution_start_reserves_daily_limit_for(store: &dyn Store) {
+        let mut invoice = test_invoice(InvoiceStatus::Settled);
+        invoice.paid_sats = 12_000;
+        invoice.confirmed_sats = 12_000;
+        let invoice_event = invoice_created_event(&invoice, invoice.created_at);
+        store
+            .insert_invoice(&invoice, &invoice_event, None)
+            .await
+            .unwrap();
+
+        let now = Utc::now();
+        let refund_one = test_refund_for_invoice(&invoice, now);
+        let mut refund_two = test_refund_for_invoice(&invoice, now);
+        refund_two.id = Uuid::new_v4();
+        for refund in [&refund_one, &refund_two] {
+            let event = crate::events::refund_created_event(refund, refund.created_at);
+            store.insert_refund(refund, &event, None).await.unwrap();
+        }
+
+        let day_start = now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .expect("midnight is valid")
+            .and_utc();
+        let mut processing_one = refund_one.clone();
+        processing_one.status = RefundStatus::Processing;
+        processing_one.updated_at = now;
+        let event_one = crate::events::refund_processing_event(&processing_one, now);
+        assert!(
+            store
+                .try_start_refund_execution(&processing_one, day_start, 3_000, &event_one, None)
+                .await
+                .unwrap()
+        );
+
+        let mut processing_two = refund_two.clone();
+        processing_two.status = RefundStatus::Processing;
+        processing_two.updated_at = now;
+        let event_two = crate::events::refund_processing_event(&processing_two, now);
+        assert!(
+            !store
+                .try_start_refund_execution(&processing_two, day_start, 3_000, &event_two, None)
+                .await
+                .unwrap()
+        );
+
+        let found_one = store
+            .refund(&refund_one.store_id, refund_one.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let found_two = store
+            .refund(&refund_two.store_id, refund_two.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found_one.status, RefundStatus::Processing);
+        assert_eq!(found_two.status, RefundStatus::Pending);
+    }
+
     async fn test_store() -> Box<dyn Store> {
         let path = std::env::temp_dir().join(format!("qpayd-test-{}.db", Uuid::new_v4()));
         let store = SqliteStore::connect(&format!("sqlite://{}", path.display()))
@@ -3655,6 +3839,28 @@ mod tests {
             expires_at: now + Duration::minutes(15),
             created_at: now,
             updated_at: now,
+        }
+    }
+
+    fn test_refund_for_invoice(invoice: &Invoice, now: chrono::DateTime<Utc>) -> Refund {
+        Refund {
+            id: Uuid::new_v4(),
+            store_id: invoice.store_id.clone(),
+            invoice_id: invoice.id,
+            status: RefundStatus::Pending,
+            approval_status: RefundApprovalStatus::NotRequired,
+            amount_sats: 2_000,
+            destination: Some("bc1qrefund".to_string()),
+            destination_type: Some(RefundDestinationType::BitcoinAddress),
+            reason: None,
+            tx_id: None,
+            payment_proof: None,
+            failure_reason: None,
+            idempotency_key: None,
+            metadata: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+            finalized_at: None,
         }
     }
 }

@@ -1570,7 +1570,12 @@ fn refund_summary(
 ) -> RefundSummaryResponse {
     let pending_refund_sats = refunds
         .iter()
-        .filter(|refund| refund.status == RefundStatus::Pending)
+        .filter(|refund| {
+            matches!(
+                refund.status,
+                RefundStatus::Pending | RefundStatus::Processing
+            )
+        })
         .map(|refund| refund.amount_sats)
         .sum();
     let succeeded_refund_sats = refunds
@@ -1843,7 +1848,8 @@ mod tests {
     use super::{AppState, refund_destination_type, router, sats_for};
     use crate::{
         config::{BitcoinPayoutBackend, BitcoinPayoutConfig, Config, RefundExecutionConfig},
-        invoice::{PaymentAmounts, RefundDestinationType},
+        events,
+        invoice::{PaymentAmounts, RefundDestinationType, RefundStatus},
         pricing::{Rate, RateSource},
         storage::{SqliteStore, Store},
     };
@@ -2404,6 +2410,96 @@ mod tests {
                 .unwrap();
         assert_eq!(summary["already_refunded_sats"], 0);
         assert_eq!(summary["refundable_sats"], 12_000);
+    }
+
+    #[tokio::test]
+    async fn processing_refunds_count_against_refundable_balance() {
+        // SAFETY: this test uses a single fixed value and does not depend on
+        // concurrent mutation of the same environment variable.
+        unsafe {
+            std::env::set_var("QPAYD_MAIN_API_TOKEN", "test-token");
+        }
+        let (app, store) = test_app_and_store().await;
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/stores/main/invoices")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"amount":"10.00","currency":"USD"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let created: serde_json::Value =
+            serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let invoice_id = uuid::Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+        store
+            .update_invoice_payment_amounts(
+                "main",
+                invoice_id,
+                PaymentAmounts {
+                    paid_sats: 12_000,
+                    confirmed_sats: 12_000,
+                    unconfirmed_sats: 0,
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+
+        let refund = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/stores/main/invoices/{invoice_id}/refunds"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"amount_sats":2000,"destination":"bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let refund: serde_json::Value =
+            serde_json::from_slice(&to_bytes(refund.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let refund_id = uuid::Uuid::parse_str(refund["id"].as_str().unwrap()).unwrap();
+        let mut refund = store.refund("main", refund_id).await.unwrap().unwrap();
+        let now = chrono::Utc::now();
+        refund.status = RefundStatus::Processing;
+        refund.updated_at = now;
+        let event = events::refund_processing_event(&refund, now);
+        store
+            .update_refund_status(&refund, &event, None)
+            .await
+            .unwrap();
+
+        let summary = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/stores/main/invoices/{invoice_id}/refund-summary"
+                    ))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(summary.status(), StatusCode::OK);
+        let summary: serde_json::Value =
+            serde_json::from_slice(&to_bytes(summary.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(summary["pending_refund_sats"], 2_000);
+        assert_eq!(summary["already_refunded_sats"], 2_000);
+        assert_eq!(summary["refundable_sats"], 10_000);
     }
 
     #[tokio::test]
