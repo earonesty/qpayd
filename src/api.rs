@@ -22,8 +22,8 @@ use crate::{
     config::{Config, PaymentLinkConfig, StoreConfig},
     events,
     invoice::{
-        Invoice, InvoiceStatus, LightningSweepRecord, Refund, RefundDestinationType, RefundStatus,
-        SweepStatus,
+        Invoice, InvoiceStatus, LightningSweepRecord, Refund, RefundApprovalStatus,
+        RefundDestinationType, RefundStatus, SweepStatus,
     },
     pricing::RateSource,
     storage::{InvoiceListFilter, Store},
@@ -85,6 +85,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/stores/{store_id}/refunds/{refund_id}/finalize",
             post(finalize_refund),
+        )
+        .route(
+            "/v1/stores/{store_id}/refunds/{refund_id}/approve",
+            post(approve_refund),
         )
         .route(
             "/v1/stores/{store_id}/refunds/{refund_id}/cancel",
@@ -626,13 +630,21 @@ async fn create_refund_for_invoice(
     }
 
     let now = Utc::now();
+    let destination_type = request.destination.as_deref().map(refund_destination_type);
+    let approval_status =
+        if refund_requires_manual_approval(store_cfg, destination_type, amount_sats) {
+            RefundApprovalStatus::Pending
+        } else {
+            RefundApprovalStatus::NotRequired
+        };
     let refund = Refund {
         id: Uuid::new_v4(),
         store_id: store_id.clone(),
         invoice_id: invoice.id,
         status: RefundStatus::Pending,
+        approval_status,
         amount_sats,
-        destination_type: request.destination.as_deref().map(refund_destination_type),
+        destination_type,
         destination: request.destination,
         reason: request.reason,
         tx_id: None,
@@ -748,6 +760,45 @@ async fn get_refund(
     Ok(Json(refund))
 }
 
+async fn approve_refund(
+    State(state): State<AppState>,
+    Path((store_id, refund_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<Refund>, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    authorize_admin(&state.config.auth, store_cfg, &headers)?;
+    let mut refund = state
+        .store
+        .refund(&store_id, refund_id)
+        .await?
+        .ok_or(ApiError::not_found("refund not found"))?;
+    if refund.status != RefundStatus::Pending {
+        return Err(ApiError::bad_request(
+            "only pending refunds can be approved",
+        ));
+    }
+    if refund.approval_status != RefundApprovalStatus::Pending {
+        return Err(ApiError::bad_request(
+            "refund does not require manual approval",
+        ));
+    }
+    let now = Utc::now();
+    refund.approval_status = RefundApprovalStatus::Approved;
+    refund.updated_at = now;
+    let event = events::refund_approved_event(&refund, now);
+    let approved = state
+        .store
+        .update_refund_approval(&refund, &event, store_cfg.webhook_url.as_deref())
+        .await?;
+    if !approved {
+        return Err(ApiError::bad_request("refund approval state changed"));
+    }
+    Ok(Json(refund))
+}
+
 async fn finalize_refund(
     State(state): State<AppState>,
     Path((store_id, refund_id)): Path<(String, Uuid)>,
@@ -768,6 +819,9 @@ async fn finalize_refund(
         return Err(ApiError::bad_request(
             "only pending refunds can be finalized",
         ));
+    }
+    if !refund.approval_status.allows_execution() {
+        return Err(ApiError::bad_request("refund requires admin approval"));
     }
     let now = Utc::now();
     refund.status = RefundStatus::Succeeded;
@@ -1549,6 +1603,51 @@ fn ensure_refund_matches_invoice(refund: &Refund, invoice_id: Uuid) -> Result<()
     }
 }
 
+fn refund_requires_manual_approval(
+    store: &crate::config::StoreConfig,
+    destination_type: Option<RefundDestinationType>,
+    amount_sats: u64,
+) -> bool {
+    refund_manual_approval_thresholds(store, destination_type)
+        .into_iter()
+        .any(|threshold| amount_sats >= threshold)
+}
+
+fn refund_manual_approval_thresholds(
+    store: &crate::config::StoreConfig,
+    destination_type: Option<RefundDestinationType>,
+) -> Vec<u64> {
+    let mut thresholds = Vec::new();
+    if matches!(
+        destination_type,
+        Some(RefundDestinationType::LightningInvoice | RefundDestinationType::Lnurl)
+            | Some(RefundDestinationType::Unknown)
+            | None
+    ) && let Some(refunds) = store
+        .effective_lightning_payout()
+        .and_then(|payout| payout.refunds)
+        && refunds.enabled
+        && let Some(threshold) = refunds.manual_approval_threshold_sats
+    {
+        thresholds.push(threshold);
+    }
+    if matches!(
+        destination_type,
+        Some(RefundDestinationType::BitcoinAddress | RefundDestinationType::BitcoinUri)
+            | Some(RefundDestinationType::Unknown)
+            | None
+    ) && let Some(refunds) = store
+        .bitcoin_payout
+        .as_ref()
+        .and_then(|payout| payout.refunds.as_ref())
+        && refunds.enabled
+        && let Some(threshold) = refunds.manual_approval_threshold_sats
+    {
+        thresholds.push(threshold);
+    }
+    thresholds
+}
+
 fn refund_destination_type(destination: &str) -> RefundDestinationType {
     let value = destination.trim();
     let lower = value.to_ascii_lowercase();
@@ -1743,7 +1842,7 @@ mod tests {
 
     use super::{AppState, refund_destination_type, router, sats_for};
     use crate::{
-        config::Config,
+        config::{BitcoinPayoutBackend, BitcoinPayoutConfig, Config, RefundExecutionConfig},
         invoice::{PaymentAmounts, RefundDestinationType},
         pricing::{Rate, RateSource},
         storage::{SqliteStore, Store},
@@ -2001,6 +2100,146 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(allowed.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn large_refunds_require_admin_approval_before_finalize() {
+        unsafe {
+            std::env::set_var("QPAYD_MAIN_API_TOKEN", "test-token");
+            std::env::set_var("QPAYD_MAIN_ADMIN_TOKEN", "admin-token");
+            std::env::set_var("QPAYD_MAIN_PAYOUT_TOKEN", "payout-token");
+        }
+        let mut config = test_config();
+        config.stores[0].admin_token_env = Some("QPAYD_MAIN_ADMIN_TOKEN".to_string());
+        config.stores[0].payout_token_env = Some("QPAYD_MAIN_PAYOUT_TOKEN".to_string());
+        config.stores[0].bitcoin_payout = Some(BitcoinPayoutConfig {
+            backend: BitcoinPayoutBackend::Bitcoind,
+            url: "http://127.0.0.1:8332".to_string(),
+            wallet: Some("refunds".to_string()),
+            rpc_auth_env: "BITCOIND_REFUND_RPC_AUTH".to_string(),
+            refunds: Some(RefundExecutionConfig {
+                enabled: true,
+                max_refund_sats: 10_000,
+                daily_refund_limit_sats: 50_000,
+                manual_approval_threshold_sats: Some(1_000),
+                poll_seconds: 30,
+            }),
+        });
+        let (app, store) = test_app_and_store_with_config(config).await;
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/stores/main/invoices")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"amount":"10.00","currency":"USD"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let created: serde_json::Value =
+            serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let invoice_id = uuid::Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+        store
+            .update_invoice_payment_amounts(
+                "main",
+                invoice_id,
+                PaymentAmounts {
+                    paid_sats: 12_000,
+                    confirmed_sats: 12_000,
+                    unconfirmed_sats: 0,
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+
+        let refund = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/stores/main/invoices/{invoice_id}/refunds"))
+                    .header(header::AUTHORIZATION, "Bearer payout-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"amount_sats":2000,"destination":"bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(refund.status(), StatusCode::OK);
+        let refund: serde_json::Value =
+            serde_json::from_slice(&to_bytes(refund.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(refund["approval_status"], "pending");
+        let refund_id = refund["id"].as_str().unwrap();
+
+        let rejected_finalize = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/stores/main/refunds/{refund_id}/finalize"))
+                    .header(header::AUTHORIZATION, "Bearer payout-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"tx_id":"refund-tx"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected_finalize.status(), StatusCode::BAD_REQUEST);
+
+        let rejected_approval = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/stores/main/refunds/{refund_id}/approve"))
+                    .header(header::AUTHORIZATION, "Bearer payout-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected_approval.status(), StatusCode::UNAUTHORIZED);
+
+        let approved = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/stores/main/refunds/{refund_id}/approve"))
+                    .header(header::AUTHORIZATION, "Bearer admin-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+        let approved: serde_json::Value =
+            serde_json::from_slice(&to_bytes(approved.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(approved["approval_status"], "approved");
+
+        let finalized = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/stores/main/refunds/{refund_id}/finalize"))
+                    .header(header::AUTHORIZATION, "Bearer payout-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"tx_id":"refund-tx"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(finalized.status(), StatusCode::OK);
     }
 
     #[tokio::test]

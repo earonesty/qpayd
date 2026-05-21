@@ -60,6 +60,7 @@ pub struct Refund {
     pub store_id: String,
     pub invoice_id: Uuid,
     pub status: RefundStatus,
+    pub approval_status: RefundApprovalStatus,
     pub amount_sats: u64,
     pub destination: Option<String>,
     pub destination_type: Option<RefundDestinationType>,
@@ -72,6 +73,41 @@ pub struct Refund {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub finalized_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefundApprovalStatus {
+    NotRequired,
+    Pending,
+    Approved,
+}
+
+impl RefundApprovalStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequired => "not_required",
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+        }
+    }
+
+    pub fn allows_execution(self) -> bool {
+        matches!(self, Self::NotRequired | Self::Approved)
+    }
+}
+
+impl TryFrom<&str> for RefundApprovalStatus {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "not_required" => Ok(Self::NotRequired),
+            "pending" => Ok(Self::Pending),
+            "approved" => Ok(Self::Approved),
+            other => anyhow::bail!("invalid refund approval status {other}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
