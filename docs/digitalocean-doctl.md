@@ -213,10 +213,12 @@ backend = "barkd"
 url = "http://127.0.0.1:3000"
 api_password_env = "BARKD_AUTH_TOKEN"
 
-[stores.lightning_sweep]
+[stores.lightning_payout]
 backend = "barkd"
 url = "http://127.0.0.1:3000"
 full_api_password_env = "BARKD_SWEEP_AUTH_TOKEN"
+
+[stores.lightning_payout.sweep]
 destination_descriptor_env = "QPAYD_MAIN_TREASURY_DESCRIPTOR"
 min_balance_sats = 100000
 target_balance_sats = 25000

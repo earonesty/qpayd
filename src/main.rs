@@ -214,8 +214,11 @@ async fn lightning_sweep_loop(config: Config) {
     let tick_seconds = config
         .stores
         .iter()
-        .filter_map(|store| store.lightning_sweep.as_ref())
-        .map(|sweep| sweep.interval_seconds)
+        .filter_map(|store| {
+            let payout = store.effective_lightning_payout()?;
+            let sweep = payout.sweep?;
+            sweep.enabled.then_some(sweep.interval_seconds)
+        })
         .min();
     let Some(tick_seconds) = tick_seconds else {
         return;
@@ -236,7 +239,13 @@ async fn lightning_sweep_once(
     last_runs: &mut std::collections::HashMap<String, std::time::Instant>,
 ) -> anyhow::Result<()> {
     for store_config in &config.stores {
-        let Some(sweep_config) = &store_config.lightning_sweep else {
+        let Some(payout_config) = store_config.effective_lightning_payout() else {
+            continue;
+        };
+        let Some(sweep_config) = &payout_config.sweep else {
+            continue;
+        };
+        if !sweep_config.enabled {
             continue;
         };
         let now = std::time::Instant::now();
@@ -254,7 +263,7 @@ async fn lightning_sweep_once(
             .parse::<bitcoin::Network>()
             .with_context(|| format!("invalid bitcoin network for store {}", store_config.id))?;
         let destination = derive_lightning_sweep_address(sweep_config, network)?;
-        match lightning::sweep_to_address(sweep_config, destination).await? {
+        match lightning::sweep_to_address(&payout_config, sweep_config, destination).await? {
             Some(result) => tracing::info!(
                 store_id = %store_config.id,
                 balance_sats = result.balance_sats,

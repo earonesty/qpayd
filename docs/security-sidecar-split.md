@@ -75,23 +75,25 @@ Remove or stop:
 qpayd --config qpayd.toml sweep
 ```
 
-Remove sweep config and full Phoenixd secrets from the public qpayd deployment:
+Remove payout config and full Phoenixd secrets from the public qpayd deployment:
 
 ```toml
 # remove this from the public server
-[stores.lightning_sweep]
+[stores.lightning_payout]
 ```
 
 ## 5. Run sweep on the Phoenixd machine
 
 On the private Phoenixd machine, keep the same store config plus
-`lightning_sweep`:
+`lightning_payout.sweep`:
 
 ```toml
-[stores.lightning_sweep]
+[stores.lightning_payout]
 backend = "phoenixd"
 url = "http://10.0.0.10:9740"
 full_api_password_env = "PHOENIXD_FULL_PASSWORD"
+
+[stores.lightning_payout.sweep]
 destination_descriptor_env = "QPAYD_MAIN_TREASURY_DESCRIPTOR"
 min_balance_sats = 100000
 target_balance_sats = 25000
