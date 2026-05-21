@@ -19,9 +19,9 @@ use uuid::Uuid;
 use crate::{
     config::{Config, PaymentLinkConfig, StoreConfig},
     events,
-    invoice::{Invoice, InvoiceStatus},
+    invoice::{Invoice, InvoiceStatus, LightningSweepRecord, Refund, RefundStatus, SweepStatus},
     pricing::RateSource,
-    storage::Store,
+    storage::{InvoiceListFilter, Store},
 };
 
 const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
@@ -54,10 +54,30 @@ pub fn router(state: AppState) -> Router {
             "/v1/public/stores/{store_id}/invoices/{invoice_id}/qr/lightning.svg",
             get(get_public_invoice_lightning_qr).options(public_invoice_preflight),
         )
-        .route("/v1/stores/{store_id}/invoices", post(create_invoice))
+        .route(
+            "/v1/stores/{store_id}/invoices",
+            get(list_invoices).post(create_invoice),
+        )
         .route(
             "/v1/stores/{store_id}/invoices/{invoice_id}",
             get(get_invoice),
+        )
+        .route(
+            "/v1/stores/{store_id}/refunds",
+            get(list_refunds).post(create_refund),
+        )
+        .route("/v1/stores/{store_id}/refunds/{refund_id}", get(get_refund))
+        .route(
+            "/v1/stores/{store_id}/refunds/{refund_id}/finalize",
+            post(finalize_refund),
+        )
+        .route(
+            "/v1/stores/{store_id}/lightning/balance",
+            get(get_lightning_balance),
+        )
+        .route(
+            "/v1/stores/{store_id}/lightning/sweeps",
+            get(list_lightning_sweeps).post(create_lightning_sweep),
         )
         .route("/v1/stores/{store_id}/events", get(list_events))
         .route("/v1/stores/{store_id}/events/{event_id}", get(get_event))
@@ -387,6 +407,285 @@ async fn list_events(
     ))
 }
 
+async fn list_invoices(
+    State(state): State<AppState>,
+    Path(store_id): Path<String>,
+    Query(query): Query<ListInvoicesQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<InvoiceResponse>>, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    authorize(store_cfg, &headers)?;
+    let status = query
+        .status
+        .as_deref()
+        .map(InvoiceStatus::try_from)
+        .transpose()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let invoices = state
+        .store
+        .invoices(
+            &store_id,
+            InvoiceListFilter {
+                status,
+                limit: query.limit.unwrap_or(50),
+            },
+        )
+        .await?;
+    Ok(Json(
+        invoices
+            .into_iter()
+            .map(|invoice| InvoiceResponse::new(invoice, store_cfg.confirmations()))
+            .collect(),
+    ))
+}
+
+async fn create_refund(
+    State(state): State<AppState>,
+    Path(store_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<CreateRefundRequest>,
+) -> Result<Json<Refund>, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    authorize(store_cfg, &headers)?;
+    let invoice = state
+        .store
+        .invoice(&store_id, request.invoice_id)
+        .await?
+        .ok_or(ApiError::not_found("invoice not found"))?;
+    let refundable_sats = invoice.paid_sats;
+    let amount_sats = request.amount_sats.unwrap_or(refundable_sats);
+    if amount_sats == 0 {
+        return Err(ApiError::bad_request(
+            "refund amount must be greater than zero",
+        ));
+    }
+    if amount_sats > refundable_sats {
+        return Err(ApiError::bad_request(
+            "refund amount cannot exceed observed paid_sats",
+        ));
+    }
+
+    let now = Utc::now();
+    let refund = Refund {
+        id: Uuid::new_v4(),
+        store_id: store_id.clone(),
+        invoice_id: invoice.id,
+        status: RefundStatus::Pending,
+        amount_sats,
+        destination: request.destination,
+        reason: request.reason,
+        tx_id: None,
+        metadata: request.metadata.unwrap_or_else(|| serde_json::json!({})),
+        created_at: now,
+        updated_at: now,
+        finalized_at: None,
+    };
+    let event = events::refund_created_event(&refund, now);
+    state
+        .store
+        .insert_refund(&refund, &event, store_cfg.webhook_url.as_deref())
+        .await?;
+    Ok(Json(refund))
+}
+
+async fn list_refunds(
+    State(state): State<AppState>,
+    Path(store_id): Path<String>,
+    Query(query): Query<ListEventsQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Refund>>, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    authorize(store_cfg, &headers)?;
+    Ok(Json(
+        state
+            .store
+            .refunds(&store_id, query.limit.unwrap_or(50))
+            .await?,
+    ))
+}
+
+async fn get_refund(
+    State(state): State<AppState>,
+    Path((store_id, refund_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<Refund>, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    authorize(store_cfg, &headers)?;
+    let refund = state
+        .store
+        .refund(&store_id, refund_id)
+        .await?
+        .ok_or(ApiError::not_found("refund not found"))?;
+    Ok(Json(refund))
+}
+
+async fn finalize_refund(
+    State(state): State<AppState>,
+    Path((store_id, refund_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<FinalizeRefundRequest>,
+) -> Result<Json<Refund>, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    authorize(store_cfg, &headers)?;
+    let mut refund = state
+        .store
+        .refund(&store_id, refund_id)
+        .await?
+        .ok_or(ApiError::not_found("refund not found"))?;
+    if refund.status != RefundStatus::Pending {
+        return Err(ApiError::bad_request("refund is already finalized"));
+    }
+    let now = Utc::now();
+    refund.status = RefundStatus::Succeeded;
+    refund.tx_id = request.tx_id;
+    refund.updated_at = now;
+    refund.finalized_at = Some(now);
+    let event = events::refund_finalized_event(&refund, now);
+    state
+        .store
+        .update_refund_status(&refund, &event, store_cfg.webhook_url.as_deref())
+        .await?;
+    Ok(Json(refund))
+}
+
+async fn get_lightning_balance(
+    State(state): State<AppState>,
+    Path(store_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<LightningBalanceResponse>, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    authorize(store_cfg, &headers)?;
+    let lightning = store_cfg
+        .lightning
+        .as_ref()
+        .ok_or(ApiError::not_found("store has no lightning backend"))?;
+    let balance = crate::lightning::hot_balance(lightning)
+        .await
+        .map_err(|error| {
+            ApiError::bad_gateway(format!(
+                "lightning backend failed to report balance: {error}"
+            ))
+        })?;
+    Ok(Json(LightningBalanceResponse {
+        backend: balance.backend,
+        balance_sats: balance.balance_sats,
+        spendable_sats: balance.spendable_sats,
+    }))
+}
+
+async fn create_lightning_sweep(
+    State(state): State<AppState>,
+    Path(store_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<LightningSweepRecord>, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    authorize(store_cfg, &headers)?;
+    let sweep_cfg = store_cfg
+        .lightning_sweep
+        .as_ref()
+        .ok_or(ApiError::not_found("store has no lightning_sweep config"))?;
+    let network = store_cfg
+        .onchain
+        .as_ref()
+        .map(|onchain| onchain.network.as_str())
+        .unwrap_or("bitcoin")
+        .parse::<bitcoin::Network>()
+        .context("invalid bitcoin network")?;
+    let destination = derive_lightning_sweep_address(sweep_cfg, network)?;
+    let now = Utc::now();
+    let record = match crate::lightning::sweep_to_address(sweep_cfg, destination.clone()).await {
+        Ok(Some(result)) => LightningSweepRecord {
+            id: Uuid::new_v4(),
+            store_id: store_id.clone(),
+            backend: sweep_cfg.backend.as_str().to_string(),
+            status: SweepStatus::Succeeded,
+            balance_sats: result.balance_sats,
+            amount_sats: result.amount_sats,
+            address: result.address,
+            tx_id: result.tx_id,
+            error: None,
+            created_at: now,
+            updated_at: now,
+        },
+        Ok(None) => LightningSweepRecord {
+            id: Uuid::new_v4(),
+            store_id: store_id.clone(),
+            backend: sweep_cfg.backend.as_str().to_string(),
+            status: SweepStatus::Skipped,
+            balance_sats: 0,
+            amount_sats: 0,
+            address: destination,
+            tx_id: None,
+            error: None,
+            created_at: now,
+            updated_at: now,
+        },
+        Err(error) => LightningSweepRecord {
+            id: Uuid::new_v4(),
+            store_id: store_id.clone(),
+            backend: sweep_cfg.backend.as_str().to_string(),
+            status: SweepStatus::Failed,
+            balance_sats: 0,
+            amount_sats: 0,
+            address: destination,
+            tx_id: None,
+            error: Some(error.to_string()),
+            created_at: now,
+            updated_at: now,
+        },
+    };
+    state.store.insert_lightning_sweep(&record).await?;
+    if record.status == SweepStatus::Failed {
+        return Err(ApiError::bad_gateway(
+            record
+                .error
+                .clone()
+                .unwrap_or_else(|| "lightning sweep failed".to_string()),
+        ));
+    }
+    Ok(Json(record))
+}
+
+async fn list_lightning_sweeps(
+    State(state): State<AppState>,
+    Path(store_id): Path<String>,
+    Query(query): Query<ListEventsQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<LightningSweepRecord>>, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    authorize(store_cfg, &headers)?;
+    Ok(Json(
+        state
+            .store
+            .lightning_sweeps(&store_id, query.limit.unwrap_or(50))
+            .await?,
+    ))
+}
+
 async fn get_event(
     State(state): State<AppState>,
     Path((store_id, event_id)): Path<(String, String)>,
@@ -499,6 +798,24 @@ fn lightning_uri(invoice: &Invoice) -> Option<String> {
         .lightning_bolt11
         .as_ref()
         .map(|bolt11| format!("lightning:{bolt11}"))
+}
+
+fn derive_lightning_sweep_address(
+    config: &crate::config::LightningSweepConfig,
+    network: bitcoin::Network,
+) -> anyhow::Result<String> {
+    let descriptor = config
+        .destination_descriptor()?
+        .parse::<Descriptor<DescriptorPublicKey>>()
+        .context("invalid lightning sweep destination descriptor")?;
+    let secp = Secp256k1::verification_only();
+    let derived = descriptor
+        .derived_descriptor(&secp, 0)
+        .context("failed to derive lightning sweep destination descriptor")?;
+    let address = derived
+        .address(network)
+        .context("lightning sweep destination descriptor does not produce an address")?;
+    Ok(address.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -672,8 +989,35 @@ pub struct CreateInvoiceRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct ListInvoicesQuery {
+    limit: Option<u32>,
+    status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ListEventsQuery {
     limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateRefundRequest {
+    pub invoice_id: Uuid,
+    pub amount_sats: Option<u64>,
+    pub destination: Option<String>,
+    pub reason: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FinalizeRefundRequest {
+    pub tx_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LightningBalanceResponse {
+    pub backend: String,
+    pub balance_sats: u64,
+    pub spendable_sats: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1009,6 +1353,51 @@ mod tests {
             second["onchain_address_index"],
             first["onchain_address_index"]
         );
+    }
+
+    #[tokio::test]
+    async fn list_invoices_returns_recent_admin_invoices() {
+        // SAFETY: this test uses a single fixed value and does not depend on
+        // concurrent mutation of the same environment variable.
+        unsafe {
+            std::env::set_var("QPAYD_MAIN_API_TOKEN", "test-token");
+        }
+        let app = test_app().await;
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/stores/main/invoices")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"amount":"10.00","currency":"USD"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let created: serde_json::Value =
+            serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+
+        let listed = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/stores/main/invoices?status=new")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed: serde_json::Value =
+            serde_json::from_slice(&to_bytes(listed.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["id"], created["id"]);
     }
 
     #[tokio::test]
