@@ -1,0 +1,51 @@
+[server]
+listen = "0.0.0.0:8080"
+onchain_poll_seconds = 30
+
+[server.admin]
+enabled = true
+store_id = "main"
+asset_source = "https://cdn.jsdelivr.net/npm/@qpayd/admin@0.4.0/src/index.js"
+asset_integrity = "sha384-UoC2NIFvzDHT33cpI06LUEsLaLvgk0omHv0u+NBuC2jZc2BQGoZQlalmYQWDt7Hu"
+
+[database]
+url = "sqlite:///data/qpayd.db"
+
+[pricing]
+kraken_url = "https://api.kraken.com/0/public/Ticker"
+stale_after_seconds = 60
+
+[[stores]]
+id = "main"
+name = "Main Store"
+api_token_env = "QPAYD_MAIN_API_TOKEN"
+invoice_expiry_minutes = 15
+min_confirmations = 1
+public_allowed_origins = ["https://YOUR_APP.fly.dev"]
+admin_allowed_origins = ["https://YOUR_APP.fly.dev"]
+
+[stores.onchain]
+network = "bitcoin"
+descriptor_env = "QPAYD_MAIN_DESCRIPTOR"
+electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+
+[stores.lightning]
+backend = "barkd"
+url = "http://127.0.0.1:3000"
+api_password_env = "BARKD_AUTH_TOKEN"
+
+[stores.lightning_sweep]
+backend = "barkd"
+url = "http://127.0.0.1:3000"
+full_api_password_env = "BARKD_SWEEP_AUTH_TOKEN"
+destination_descriptor_env = "QPAYD_MAIN_TREASURY_DESCRIPTOR"
+min_balance_sats = 100000
+target_balance_sats = 25000
+interval_seconds = 3600
+
+[[stores.payment_links]]
+id = "donate-10"
+amount = "10.00"
+currency = "USD"
+public_allowed_origins = ["https://YOUR_APP.fly.dev"]
+metadata = { kind = "donation", source = "fly-barkd" }

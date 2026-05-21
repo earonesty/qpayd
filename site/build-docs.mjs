@@ -33,7 +33,7 @@ const md = new MarkdownIt({
 });
 
 const files = (await fs.readdir(docsDir))
-  .filter((file) => file.endsWith(".md"))
+  .filter((file) => file.endsWith(".md") && !file.endsWith(".release.md"))
   .sort();
 const pages = [];
 

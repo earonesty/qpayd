@@ -23,5 +23,4 @@ Deployment guides:
 - [Fly.io Quickstart with barkd](./fly-sidecar-barkd.html)
 - [DigitalOcean Quickstart with doctl](./digitalocean-doctl.html)
 - [Move from SQLite to Postgres](./sqlite-to-postgres.html)
-- [Split a Public App from a Private Payment Sidecar](./security-sidecar-split.html)
-
+- [Split Lightning funds from the payment server](./security-sidecar-split.html)

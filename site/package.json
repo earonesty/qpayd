@@ -2,7 +2,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node build-docs.mjs"
+    "build": "node build-docs.mjs",
+    "render-admin-portal": "node render-admin-portal-doc.mjs"
   },
   "dependencies": {
     "gray-matter": "^4.0.3",
