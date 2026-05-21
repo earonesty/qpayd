@@ -114,8 +114,5 @@ refund_poll_seconds = 30
 ```
 
 Keep `refund_execution_enabled = false` until refund execution is released, and
-continue finalizing or failing refunds manually. When refund execution is
-released, qpayd will ask each configured refund backend in the order it appears
-in `stores.hot_wallets` whether it can handle the refund destination. The first
-matching backend will execute the refund. Backend-specific wallet configuration
-is covered in [Lightning backends](./lightning-backends.md).
+continue finalizing or failing refunds manually. Backend-specific wallet
+configuration is covered in [Lightning backends](./lightning-backends.md).
