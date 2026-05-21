@@ -21,6 +21,7 @@ min_confirmations = 1
 [stores.onchain]
 network = "bitcoin"
 descriptor_env = "QPAYD_MAIN_DESCRIPTOR"
+# Add more trusted Electrum servers to enable deterministic rotation and fallback.
 electrum_servers = ["ssl://electrum.blockstream.info:50002"]
 
 [stores.lightning]

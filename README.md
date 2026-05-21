@@ -76,6 +76,8 @@ public_allowed_origins = ["https://example.com"]
 metadata = { kind = "donation", source = "static-site" }
 ```
 
+Add more trusted Electrum servers to `electrum_servers` to enable fallback. qpayd rotates the first server by invoice address index, then tries the remaining servers in order if one is unavailable.
+
 With Phoenixd configured, qpayd creates BOLT11 invoices and polls Phoenixd for
 incoming payment status during reconciliation:
 
