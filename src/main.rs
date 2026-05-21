@@ -146,12 +146,17 @@ async fn sync_loop(config: Config, store: Arc<dyn Store>) {
 
 async fn sync_once(config: Config, store: Arc<dyn Store>) -> anyhow::Result<()> {
     for store_config in &config.stores {
-        if let Some(onchain_config) = &store_config.onchain
-            && let Some(server) = onchain_config.electrum_servers.first()
-        {
+        if let Some(onchain_config) = &store_config.onchain {
             let invoices = store.active_onchain_invoices(&store_config.id).await?;
             for invoice in invoices {
-                let observation = onchain::observe(server.clone(), invoice.clone()).await?;
+                let observation =
+                    onchain::observe(onchain_config.electrum_servers.clone(), invoice.clone())
+                        .await?;
+                tracing::debug!(
+                    invoice_id = %invoice.id,
+                    electrum_server = %observation.server,
+                    "observed on-chain invoice"
+                );
                 update_invoice_status_event(
                     store.clone(),
                     store_config.webhook_url.as_deref(),

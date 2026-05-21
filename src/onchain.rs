@@ -7,34 +7,68 @@ use crate::invoice::{Invoice, InvoiceStatus};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OnchainObservation {
+    pub server: String,
     pub confirmed_sats: u64,
     pub unconfirmed_sats: u64,
     pub next_status: InvoiceStatus,
 }
 
-pub async fn observe(server: String, invoice: Invoice) -> anyhow::Result<OnchainObservation> {
-    tokio::task::spawn_blocking(move || observe_blocking(&server, &invoice))
+pub async fn observe(servers: Vec<String>, invoice: Invoice) -> anyhow::Result<OnchainObservation> {
+    tokio::task::spawn_blocking(move || observe_blocking(&servers, &invoice))
         .await
         .map_err(anyhow::Error::from)?
 }
 
-fn observe_blocking(server: &str, invoice: &Invoice) -> anyhow::Result<OnchainObservation> {
+fn observe_blocking(servers: &[String], invoice: &Invoice) -> anyhow::Result<OnchainObservation> {
+    if servers.is_empty() {
+        anyhow::bail!("invoice has no electrum servers configured");
+    }
     let script_hex = invoice
         .onchain_script_pubkey
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("invoice has no on-chain script pubkey"))?;
     let script = ScriptBuf::from_bytes(hex::decode(script_hex)?);
-    let client = Client::new(server)?;
-    let balance = client.script_get_balance(script.as_script())?;
-    let confirmed_sats = balance.confirmed as u64;
-    let unconfirmed_sats = balance.unconfirmed.max(0) as u64;
-    let next_status = next_status(invoice, Utc::now(), confirmed_sats, unconfirmed_sats);
+    let start = invoice
+        .onchain_address_index
+        .map(|index| index as usize)
+        .unwrap_or_default();
+    let mut errors = Vec::new();
+    for server in rotated_servers(servers, start) {
+        match observe_script(server, invoice, script.as_script()) {
+            Ok(observation) => return Ok(observation),
+            Err(error) => errors.push(format!("{server}: {error:#}")),
+        }
+    }
 
+    anyhow::bail!(
+        "all electrum servers failed for invoice {}: {}",
+        invoice.id,
+        errors.join("; ")
+    )
+}
+
+fn observe_script(
+    server: &str,
+    invoice: &Invoice,
+    script: &bitcoin::Script,
+) -> anyhow::Result<OnchainObservation> {
+    let client = Client::new(server)?;
+    let balance = client.script_get_balance(script)?;
+    let confirmed_sats = balance.confirmed;
+    let unconfirmed_sats = balance.unconfirmed.max(0) as u64;
     Ok(OnchainObservation {
+        server: server.to_string(),
         confirmed_sats,
         unconfirmed_sats,
-        next_status,
+        next_status: next_status(invoice, Utc::now(), confirmed_sats, unconfirmed_sats),
     })
+}
+
+fn rotated_servers(servers: &[String], start: usize) -> Vec<&str> {
+    let len = servers.len();
+    (0..len)
+        .map(|offset| servers[(start + offset) % len].as_str())
+        .collect()
 }
 
 pub fn next_status(
@@ -83,7 +117,7 @@ mod tests {
     use rust_decimal::Decimal;
     use uuid::Uuid;
 
-    use super::next_status;
+    use super::{next_status, rotated_servers};
     use crate::invoice::{Invoice, InvoiceStatus};
 
     #[test]
@@ -148,6 +182,39 @@ mod tests {
         assert_eq!(
             next_status(&invoice, now, 12_000, 0),
             InvoiceStatus::Settled
+        );
+    }
+
+    #[test]
+    fn rotates_electrum_servers_by_address_index() {
+        let servers = vec![
+            "ssl://one.example:50002".to_string(),
+            "ssl://two.example:50002".to_string(),
+            "ssl://three.example:50002".to_string(),
+        ];
+        assert_eq!(
+            rotated_servers(&servers, 0),
+            vec![
+                "ssl://one.example:50002",
+                "ssl://two.example:50002",
+                "ssl://three.example:50002"
+            ]
+        );
+        assert_eq!(
+            rotated_servers(&servers, 1),
+            vec![
+                "ssl://two.example:50002",
+                "ssl://three.example:50002",
+                "ssl://one.example:50002"
+            ]
+        );
+        assert_eq!(
+            rotated_servers(&servers, 5),
+            vec![
+                "ssl://three.example:50002",
+                "ssl://one.example:50002",
+                "ssl://two.example:50002"
+            ]
         );
     }
 
