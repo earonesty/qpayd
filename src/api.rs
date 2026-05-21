@@ -21,7 +21,10 @@ use uuid::Uuid;
 use crate::{
     config::{Config, PaymentLinkConfig, StoreConfig},
     events,
-    invoice::{Invoice, InvoiceStatus, LightningSweepRecord, Refund, RefundStatus, SweepStatus},
+    invoice::{
+        Invoice, InvoiceStatus, LightningSweepRecord, Refund, RefundDestinationType, RefundStatus,
+        SweepStatus,
+    },
     pricing::RateSource,
     storage::{InvoiceListFilter, Store},
 };
@@ -86,6 +89,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/stores/{store_id}/refunds/{refund_id}/cancel",
             post(cancel_refund),
+        )
+        .route(
+            "/v1/stores/{store_id}/refunds/{refund_id}/fail",
+            post(fail_refund),
         )
         .route(
             "/v1/stores/{store_id}/lightning/balance",
@@ -584,6 +591,16 @@ async fn create_refund_for_invoice(
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
     authorize(store_cfg, &headers)?;
+    let idempotency_key = idempotency_key_from_headers(&headers)?;
+    if let Some(key) = &idempotency_key
+        && let Some(refund) = state
+            .store
+            .refund_by_idempotency_key(&store_id, key)
+            .await?
+    {
+        return Ok(Json(refund));
+    }
+
     let invoice = state
         .store
         .invoice(&store_id, invoice_id)
@@ -614,19 +631,34 @@ async fn create_refund_for_invoice(
         invoice_id: invoice.id,
         status: RefundStatus::Pending,
         amount_sats,
+        destination_type: request.destination.as_deref().map(refund_destination_type),
         destination: request.destination,
         reason: request.reason,
         tx_id: None,
+        payment_proof: None,
+        failure_reason: None,
+        idempotency_key,
         metadata: request.metadata.unwrap_or_else(|| serde_json::json!({})),
         created_at: now,
         updated_at: now,
         finalized_at: None,
     };
     let event = events::refund_created_event(&refund, now);
-    state
+    if let Err(error) = state
         .store
         .insert_refund(&refund, &event, store_cfg.webhook_url.as_deref())
-        .await?;
+        .await
+    {
+        if let Some(key) = &refund.idempotency_key
+            && let Some(existing) = state
+                .store
+                .refund_by_idempotency_key(&store_id, key)
+                .await?
+        {
+            return Ok(Json(existing));
+        }
+        return Err(error.into());
+    }
     Ok(Json(refund))
 }
 
@@ -731,14 +763,54 @@ async fn finalize_refund(
         .await?
         .ok_or(ApiError::not_found("refund not found"))?;
     if refund.status != RefundStatus::Pending {
-        return Err(ApiError::bad_request("refund is already finalized"));
+        return Err(ApiError::bad_request(
+            "only pending refunds can be finalized",
+        ));
     }
     let now = Utc::now();
     refund.status = RefundStatus::Succeeded;
     refund.tx_id = request.tx_id;
+    refund.payment_proof = request.payment_proof;
+    refund.failure_reason = None;
     refund.updated_at = now;
     refund.finalized_at = Some(now);
     let event = events::refund_finalized_event(&refund, now);
+    state
+        .store
+        .update_refund_status(&refund, &event, store_cfg.webhook_url.as_deref())
+        .await?;
+    Ok(Json(refund))
+}
+
+async fn fail_refund(
+    State(state): State<AppState>,
+    Path((store_id, refund_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<FailRefundRequest>,
+) -> Result<Json<Refund>, ApiError> {
+    let store_cfg = state
+        .config
+        .store(&store_id)
+        .ok_or(ApiError::not_found("store not found"))?;
+    authorize(store_cfg, &headers)?;
+    let mut refund = state
+        .store
+        .refund(&store_id, refund_id)
+        .await?
+        .ok_or(ApiError::not_found("refund not found"))?;
+    if refund.status != RefundStatus::Pending {
+        return Err(ApiError::bad_request("only pending refunds can be failed"));
+    }
+    let reason = request.failure_reason.trim();
+    if reason.is_empty() {
+        return Err(ApiError::bad_request("failure_reason is required"));
+    }
+
+    let now = Utc::now();
+    refund.status = RefundStatus::Failed;
+    refund.failure_reason = Some(reason.to_string());
+    refund.updated_at = now;
+    let event = events::refund_failed_event(&refund, now);
     state
         .store
         .update_refund_status(&refund, &event, store_cfg.webhook_url.as_deref())
@@ -1298,6 +1370,12 @@ pub struct CreateRefundRequest {
 #[derive(Debug, Deserialize)]
 pub struct FinalizeRefundRequest {
     pub tx_id: Option<String>,
+    pub payment_proof: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FailRefundRequest {
+    pub failure_reason: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1425,6 +1503,34 @@ fn refund_summary(
         overpaid_sats,
         pending_refund_sats,
         succeeded_refund_sats,
+    }
+}
+
+fn refund_destination_type(destination: &str) -> RefundDestinationType {
+    let value = destination.trim();
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with("bitcoin:") {
+        RefundDestinationType::BitcoinUri
+    } else if lower.starts_with("lightning:")
+        || lower.starts_with("lnbc")
+        || lower.starts_with("lntb")
+        || lower.starts_with("lnbcrt")
+    {
+        RefundDestinationType::LightningInvoice
+    } else if lower.starts_with("lnurl") || lower.starts_with("lnurlp") {
+        RefundDestinationType::Lnurl
+    } else if lower.starts_with("bc1")
+        || lower.starts_with("tb1")
+        || lower.starts_with("bcrt1")
+        || value.starts_with('1')
+        || value.starts_with('3')
+        || value.starts_with('m')
+        || value.starts_with('n')
+        || value.starts_with('2')
+    {
+        RefundDestinationType::BitcoinAddress
+    } else {
+        RefundDestinationType::Unknown
     }
 }
 
@@ -1802,6 +1908,7 @@ mod tests {
                     .uri(format!("/v1/stores/main/invoices/{invoice_id}/refunds"))
                     .header(header::AUTHORIZATION, "Bearer test-token")
                     .header(header::CONTENT_TYPE, "application/json")
+                    .header("Idempotency-Key", "refund-order-1")
                     .body(Body::from(
                         r#"{"amount_sats":2000,"destination":"bc1qrefund","reason":"overpayment"}"#,
                     ))
@@ -1813,6 +1920,31 @@ mod tests {
         let refund: serde_json::Value =
             serde_json::from_slice(&to_bytes(refund.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
+        assert_eq!(refund["destination_type"], "bitcoin_address");
+        assert_eq!(refund["idempotency_key"], "refund-order-1");
+
+        let replayed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/stores/main/invoices/{invoice_id}/refunds"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("Idempotency-Key", "refund-order-1")
+                    .body(Body::from(
+                        r#"{"amount_sats":3000,"destination":"bitcoin:bc1qother","reason":"retry"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replayed.status(), StatusCode::OK);
+        let replayed: serde_json::Value =
+            serde_json::from_slice(&to_bytes(replayed.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(replayed["id"], refund["id"]);
+        assert_eq!(replayed["amount_sats"], 2000);
 
         let too_much = app
             .clone()
@@ -1867,6 +1999,141 @@ mod tests {
                 .unwrap();
         assert_eq!(summary["already_refunded_sats"], 0);
         assert_eq!(summary["refundable_sats"], 12_000);
+    }
+
+    #[tokio::test]
+    async fn refunds_can_finalize_with_proof_and_fail() {
+        // SAFETY: this test uses a single fixed value and does not depend on
+        // concurrent mutation of the same environment variable.
+        unsafe {
+            std::env::set_var("QPAYD_MAIN_API_TOKEN", "test-token");
+        }
+        let (app, store) = test_app_and_store().await;
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/stores/main/invoices")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"amount":"10.00","currency":"USD"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let created: serde_json::Value =
+            serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let invoice_id = uuid::Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+        store
+            .update_invoice_payment_amounts(
+                "main",
+                invoice_id,
+                PaymentAmounts {
+                    paid_sats: 12_000,
+                    confirmed_sats: 12_000,
+                    unconfirmed_sats: 0,
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+
+        let finalized_refund = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/stores/main/invoices/{invoice_id}/refunds"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"amount_sats":2000,"destination":"bitcoin:bc1qrefund","reason":"operator"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let finalized_refund: serde_json::Value = serde_json::from_slice(
+            &to_bytes(finalized_refund.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(finalized_refund["destination_type"], "bitcoin_uri");
+
+        let finalized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/stores/main/refunds/{}/finalize",
+                        finalized_refund["id"].as_str().unwrap()
+                    ))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"tx_id":"tx123","payment_proof":"proof123"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(finalized.status(), StatusCode::OK);
+        let finalized: serde_json::Value =
+            serde_json::from_slice(&to_bytes(finalized.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(finalized["status"], "succeeded");
+        assert_eq!(finalized["tx_id"], "tx123");
+        assert_eq!(finalized["payment_proof"], "proof123");
+
+        let failed_refund = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/stores/main/invoices/{invoice_id}/refunds"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"amount_sats":1000,"destination":"lnbc1refund","reason":"operator"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let failed_refund: serde_json::Value = serde_json::from_slice(
+            &to_bytes(failed_refund.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(failed_refund["destination_type"], "lightning_invoice");
+
+        let failed = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/stores/main/refunds/{}/fail",
+                        failed_refund["id"].as_str().unwrap()
+                    ))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"failure_reason":"expired invoice"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(failed.status(), StatusCode::OK);
+        let failed: serde_json::Value =
+            serde_json::from_slice(&to_bytes(failed.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["failure_reason"], "expired invoice");
     }
 
     #[tokio::test]

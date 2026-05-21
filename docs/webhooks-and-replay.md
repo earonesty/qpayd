@@ -67,6 +67,7 @@ invoice.expired
 invoice.paid_late
 refund.created
 refund.finalized
+refund.failed
 refund.canceled
 ```
 

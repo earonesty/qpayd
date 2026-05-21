@@ -51,7 +51,17 @@ export class QPaydAdminClient {
   async finalizeRefund(refundId, options = {}) {
     return this.#json(`/v1/stores/${encodeURIComponent(this.storeId)}/refunds/${encodeURIComponent(refundId)}/finalize`, {
       method: "POST",
-      body: JSON.stringify({ tx_id: options.txId || null })
+      body: JSON.stringify({
+        tx_id: options.txId || null,
+        payment_proof: options.paymentProof || null
+      })
+    });
+  }
+
+  async failRefund(refundId, failureReason) {
+    return this.#json(`/v1/stores/${encodeURIComponent(this.storeId)}/refunds/${encodeURIComponent(refundId)}/fail`, {
+      method: "POST",
+      body: JSON.stringify({ failure_reason: failureReason })
     });
   }
 
@@ -178,6 +188,9 @@ function bind(root, state) {
   root.querySelectorAll("[data-qpayd-finalize]").forEach((button) => {
     button.addEventListener("click", () => finalizeRefund(root, state, button.dataset.qpaydFinalize));
   });
+  root.querySelectorAll("[data-qpayd-fail]").forEach((button) => {
+    button.addEventListener("click", () => failRefund(root, state, button.dataset.qpaydFail));
+  });
   root.querySelectorAll("[data-qpayd-cancel]").forEach((button) => {
     button.addEventListener("click", () => cancelRefund(root, state, button.dataset.qpaydCancel));
   });
@@ -235,12 +248,31 @@ async function createRefund(root, state, form) {
 }
 
 async function finalizeRefund(root, state, refundId) {
-  const txId = window.prompt("Transaction id or payment proof");
+  const txId = window.prompt("Transaction id");
   if (txId === null) return;
+  const paymentProof = window.prompt("Payment proof", txId.trim());
+  if (paymentProof === null) return;
   state.error = "";
   try {
-    await state.client.finalizeRefund(refundId, { txId: txId.trim() });
+    await state.client.finalizeRefund(refundId, {
+      txId: txId.trim(),
+      paymentProof: paymentProof.trim()
+    });
     state.notice = "Refund finalized";
+    await loadInvoice(root, state, state.selectedInvoice.id, false);
+  } catch (error) {
+    state.error = error.message;
+    render(root, state);
+  }
+}
+
+async function failRefund(root, state, refundId) {
+  const failureReason = window.prompt("Failure reason");
+  if (failureReason === null) return;
+  state.error = "";
+  try {
+    await state.client.failRefund(refundId, failureReason.trim());
+    state.notice = "Refund failed";
     await loadInvoice(root, state, state.selectedInvoice.id, false);
   } catch (error) {
     state.error = error.message;
@@ -417,9 +449,12 @@ function refundHtml(refund) {
         <strong>${sats(refund.amount_sats)}</strong>
         <span>${escapeHtml(refund.status)}</span>
         <p>${escapeHtml(refund.destination || "No destination recorded")}</p>
+        ${refund.destination_type ? `<p>${escapeHtml(refund.destination_type)}</p>` : ""}
+        ${refund.failure_reason ? `<p>${escapeHtml(refund.failure_reason)}</p>` : ""}
       </div>
       <div class="qpayd-refund-actions">
         ${pending ? `<button type="button" data-qpayd-finalize="${escapeHtml(refund.id)}">Finalize</button>` : ""}
+        ${pending ? `<button type="button" data-qpayd-fail="${escapeHtml(refund.id)}">Fail</button>` : ""}
         ${pending ? `<button type="button" data-qpayd-cancel="${escapeHtml(refund.id)}">Cancel</button>` : ""}
       </div>
     </article>

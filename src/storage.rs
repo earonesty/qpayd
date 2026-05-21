@@ -14,7 +14,7 @@ use crate::{
     events::{EventEnvelope, QueuedWebhookDelivery},
     invoice::{
         Invoice, InvoiceStatus, InvoiceStatusUpdate, LightningSweepRecord, PaymentAmounts, Refund,
-        RefundStatus, SweepStatus,
+        RefundDestinationType, RefundStatus, SweepStatus,
     },
 };
 
@@ -107,6 +107,11 @@ pub trait Store: Send + Sync {
         webhook_url: Option<&str>,
     ) -> anyhow::Result<()>;
     async fn refund(&self, store_id: &str, id: Uuid) -> anyhow::Result<Option<Refund>>;
+    async fn refund_by_idempotency_key(
+        &self,
+        store_id: &str,
+        idempotency_key: &str,
+    ) -> anyhow::Result<Option<Refund>>;
     async fn refunds(&self, store_id: &str, limit: u32) -> anyhow::Result<Vec<Refund>>;
     async fn refunds_for_invoice(
         &self,
@@ -670,9 +675,9 @@ impl Store for SqliteStore {
         sqlx::query(
             r#"
             INSERT INTO refunds (
-                id, store_id, invoice_id, status, amount_sats, destination,
-                reason, tx_id, metadata, created_at, updated_at, finalized_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                id, store_id, invoice_id, status, amount_sats, destination, destination_type,
+                reason, tx_id, payment_proof, failure_reason, idempotency_key, metadata, created_at, updated_at, finalized_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(refund.id.to_string())
@@ -681,8 +686,12 @@ impl Store for SqliteStore {
         .bind(refund.status.as_str())
         .bind(refund.amount_sats as i64)
         .bind(&refund.destination)
+        .bind(refund.destination_type.map(|value| value.as_str()))
         .bind(&refund.reason)
         .bind(&refund.tx_id)
+        .bind(&refund.payment_proof)
+        .bind(&refund.failure_reason)
+        .bind(&refund.idempotency_key)
         .bind(refund.metadata.to_string())
         .bind(refund.created_at.to_rfc3339())
         .bind(refund.updated_at.to_rfc3339())
@@ -702,8 +711,8 @@ impl Store for SqliteStore {
     async fn refund(&self, store_id: &str, id: Uuid) -> anyhow::Result<Option<Refund>> {
         let Some(row) = sqlx::query(
             r#"
-            SELECT id, store_id, invoice_id, status, amount_sats, destination,
-                   reason, tx_id, metadata, created_at, updated_at, finalized_at
+            SELECT id, store_id, invoice_id, status, amount_sats, destination, destination_type,
+                   reason, tx_id, payment_proof, failure_reason, idempotency_key, metadata, created_at, updated_at, finalized_at
             FROM refunds
             WHERE store_id = ? AND id = ?
             "#,
@@ -718,11 +727,34 @@ impl Store for SqliteStore {
         Ok(Some(refund_from_row(row)?))
     }
 
+    async fn refund_by_idempotency_key(
+        &self,
+        store_id: &str,
+        idempotency_key: &str,
+    ) -> anyhow::Result<Option<Refund>> {
+        let Some(row) = sqlx::query(
+            r#"
+            SELECT id, store_id, invoice_id, status, amount_sats, destination, destination_type,
+                   reason, tx_id, payment_proof, failure_reason, idempotency_key, metadata, created_at, updated_at, finalized_at
+            FROM refunds
+            WHERE store_id = ? AND idempotency_key = ?
+            "#,
+        )
+        .bind(store_id)
+        .bind(idempotency_key)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(refund_from_row(row)?))
+    }
+
     async fn refunds(&self, store_id: &str, limit: u32) -> anyhow::Result<Vec<Refund>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, store_id, invoice_id, status, amount_sats, destination,
-                   reason, tx_id, metadata, created_at, updated_at, finalized_at
+            SELECT id, store_id, invoice_id, status, amount_sats, destination, destination_type,
+                   reason, tx_id, payment_proof, failure_reason, idempotency_key, metadata, created_at, updated_at, finalized_at
             FROM refunds
             WHERE store_id = ?
             ORDER BY created_at DESC
@@ -743,8 +775,8 @@ impl Store for SqliteStore {
     ) -> anyhow::Result<Vec<Refund>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, store_id, invoice_id, status, amount_sats, destination,
-                   reason, tx_id, metadata, created_at, updated_at, finalized_at
+            SELECT id, store_id, invoice_id, status, amount_sats, destination, destination_type,
+                   reason, tx_id, payment_proof, failure_reason, idempotency_key, metadata, created_at, updated_at, finalized_at
             FROM refunds
             WHERE store_id = ? AND invoice_id = ?
             ORDER BY created_at DESC
@@ -767,12 +799,14 @@ impl Store for SqliteStore {
         sqlx::query(
             r#"
             UPDATE refunds
-            SET status = ?, tx_id = ?, updated_at = ?, finalized_at = ?
+            SET status = ?, tx_id = ?, payment_proof = ?, failure_reason = ?, updated_at = ?, finalized_at = ?
             WHERE store_id = ? AND id = ?
             "#,
         )
         .bind(refund.status.as_str())
         .bind(&refund.tx_id)
+        .bind(&refund.payment_proof)
+        .bind(&refund.failure_reason)
         .bind(refund.updated_at.to_rfc3339())
         .bind(refund.finalized_at.map(|time| time.to_rfc3339()))
         .bind(&refund.store_id)
@@ -1342,9 +1376,9 @@ impl Store for PostgresStore {
         sqlx::query(
             r#"
             INSERT INTO qpayd_refunds (
-                id, store_id, invoice_id, status, amount_sats, destination,
-                reason, tx_id, metadata, created_at, updated_at, finalized_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                id, store_id, invoice_id, status, amount_sats, destination, destination_type,
+                reason, tx_id, payment_proof, failure_reason, idempotency_key, metadata, created_at, updated_at, finalized_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             "#,
         )
         .bind(refund.id.to_string())
@@ -1353,8 +1387,12 @@ impl Store for PostgresStore {
         .bind(refund.status.as_str())
         .bind(refund.amount_sats as i64)
         .bind(&refund.destination)
+        .bind(refund.destination_type.map(|value| value.as_str()))
         .bind(&refund.reason)
         .bind(&refund.tx_id)
+        .bind(&refund.payment_proof)
+        .bind(&refund.failure_reason)
+        .bind(&refund.idempotency_key)
         .bind(refund.metadata.to_string())
         .bind(refund.created_at.to_rfc3339())
         .bind(refund.updated_at.to_rfc3339())
@@ -1374,8 +1412,8 @@ impl Store for PostgresStore {
     async fn refund(&self, store_id: &str, id: Uuid) -> anyhow::Result<Option<Refund>> {
         let Some(row) = sqlx::query(
             r#"
-            SELECT id, store_id, invoice_id, status, amount_sats, destination,
-                   reason, tx_id, metadata, created_at, updated_at, finalized_at
+            SELECT id, store_id, invoice_id, status, amount_sats, destination, destination_type,
+                   reason, tx_id, payment_proof, failure_reason, idempotency_key, metadata, created_at, updated_at, finalized_at
             FROM qpayd_refunds
             WHERE store_id = $1 AND id = $2
             "#,
@@ -1390,11 +1428,34 @@ impl Store for PostgresStore {
         Ok(Some(refund_from_pg_row(row)?))
     }
 
+    async fn refund_by_idempotency_key(
+        &self,
+        store_id: &str,
+        idempotency_key: &str,
+    ) -> anyhow::Result<Option<Refund>> {
+        let Some(row) = sqlx::query(
+            r#"
+            SELECT id, store_id, invoice_id, status, amount_sats, destination, destination_type,
+                   reason, tx_id, payment_proof, failure_reason, idempotency_key, metadata, created_at, updated_at, finalized_at
+            FROM qpayd_refunds
+            WHERE store_id = $1 AND idempotency_key = $2
+            "#,
+        )
+        .bind(store_id)
+        .bind(idempotency_key)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(refund_from_pg_row(row)?))
+    }
+
     async fn refunds(&self, store_id: &str, limit: u32) -> anyhow::Result<Vec<Refund>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, store_id, invoice_id, status, amount_sats, destination,
-                   reason, tx_id, metadata, created_at, updated_at, finalized_at
+            SELECT id, store_id, invoice_id, status, amount_sats, destination, destination_type,
+                   reason, tx_id, payment_proof, failure_reason, idempotency_key, metadata, created_at, updated_at, finalized_at
             FROM qpayd_refunds
             WHERE store_id = $1
             ORDER BY created_at DESC
@@ -1415,8 +1476,8 @@ impl Store for PostgresStore {
     ) -> anyhow::Result<Vec<Refund>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, store_id, invoice_id, status, amount_sats, destination,
-                   reason, tx_id, metadata, created_at, updated_at, finalized_at
+            SELECT id, store_id, invoice_id, status, amount_sats, destination, destination_type,
+                   reason, tx_id, payment_proof, failure_reason, idempotency_key, metadata, created_at, updated_at, finalized_at
             FROM qpayd_refunds
             WHERE store_id = $1 AND invoice_id = $2
             ORDER BY created_at DESC
@@ -1439,12 +1500,14 @@ impl Store for PostgresStore {
         sqlx::query(
             r#"
             UPDATE qpayd_refunds
-            SET status = $1, tx_id = $2, updated_at = $3, finalized_at = $4
-            WHERE store_id = $5 AND id = $6
+            SET status = $1, tx_id = $2, payment_proof = $3, failure_reason = $4, updated_at = $5, finalized_at = $6
+            WHERE store_id = $7 AND id = $8
             "#,
         )
         .bind(refund.status.as_str())
         .bind(&refund.tx_id)
+        .bind(&refund.payment_proof)
+        .bind(&refund.failure_reason)
         .bind(refund.updated_at.to_rfc3339())
         .bind(refund.finalized_at.map(|time| time.to_rfc3339()))
         .bind(&refund.store_id)
@@ -1683,6 +1746,29 @@ const SQLITE_MIGRATIONS: &[Migration] = &[
             "#,
         ],
     },
+    Migration {
+        version: 6,
+        name: "refund_idempotency_and_proofs",
+        statements: &[
+            r#"
+        ALTER TABLE refunds ADD COLUMN destination_type TEXT
+        "#,
+            r#"
+        ALTER TABLE refunds ADD COLUMN payment_proof TEXT
+        "#,
+            r#"
+        ALTER TABLE refunds ADD COLUMN failure_reason TEXT
+        "#,
+            r#"
+        ALTER TABLE refunds ADD COLUMN idempotency_key TEXT
+        "#,
+            r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS refunds_store_idempotency_key_idx
+        ON refunds (store_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL
+            "#,
+        ],
+    },
 ];
 
 const POSTGRES_MIGRATIONS: &[Migration] = &[
@@ -1849,6 +1935,29 @@ const POSTGRES_MIGRATIONS: &[Migration] = &[
         CREATE UNIQUE INDEX IF NOT EXISTS qpayd_invoices_store_payment_link_idempotency_key_idx
         ON qpayd_invoices (store_id, payment_link_id, idempotency_key)
         WHERE idempotency_key IS NOT NULL AND payment_link_id IS NOT NULL
+            "#,
+        ],
+    },
+    Migration {
+        version: 6,
+        name: "refund_idempotency_and_proofs",
+        statements: &[
+            r#"
+        ALTER TABLE qpayd_refunds ADD COLUMN destination_type TEXT
+        "#,
+            r#"
+        ALTER TABLE qpayd_refunds ADD COLUMN payment_proof TEXT
+        "#,
+            r#"
+        ALTER TABLE qpayd_refunds ADD COLUMN failure_reason TEXT
+        "#,
+            r#"
+        ALTER TABLE qpayd_refunds ADD COLUMN idempotency_key TEXT
+        "#,
+            r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS qpayd_refunds_store_idempotency_key_idx
+        ON qpayd_refunds (store_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL
             "#,
         ],
     },
@@ -2101,8 +2210,12 @@ fn refund_from_row(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<Refund> {
         row.get("status"),
         row.get::<i64, _>("amount_sats"),
         row.get("destination"),
+        row.get("destination_type"),
         row.get("reason"),
         row.get("tx_id"),
+        row.get("payment_proof"),
+        row.get("failure_reason"),
+        row.get("idempotency_key"),
         row.get("metadata"),
         row.get("created_at"),
         row.get("updated_at"),
@@ -2118,8 +2231,12 @@ fn refund_from_pg_row(row: sqlx::postgres::PgRow) -> anyhow::Result<Refund> {
         row.get("status"),
         row.get::<i64, _>("amount_sats"),
         row.get("destination"),
+        row.get("destination_type"),
         row.get("reason"),
         row.get("tx_id"),
+        row.get("payment_proof"),
+        row.get("failure_reason"),
+        row.get("idempotency_key"),
         row.get("metadata"),
         row.get("created_at"),
         row.get("updated_at"),
@@ -2135,8 +2252,12 @@ fn refund_from_fields(
     status: String,
     amount_sats: i64,
     destination: Option<String>,
+    destination_type: Option<String>,
     reason: Option<String>,
     tx_id: Option<String>,
+    payment_proof: Option<String>,
+    failure_reason: Option<String>,
+    idempotency_key: Option<String>,
     metadata: String,
     created_at: String,
     updated_at: String,
@@ -2149,8 +2270,15 @@ fn refund_from_fields(
         status: RefundStatus::try_from(status.as_str())?,
         amount_sats: amount_sats as u64,
         destination,
+        destination_type: destination_type
+            .as_deref()
+            .map(RefundDestinationType::try_from)
+            .transpose()?,
         reason,
         tx_id,
+        payment_proof,
+        failure_reason,
+        idempotency_key,
         metadata: serde_json::from_str(&metadata)?,
         created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
         updated_at: DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc),
@@ -2271,7 +2399,7 @@ mod tests {
         events::{invoice_created_event, invoice_status_event},
         invoice::{
             Invoice, InvoiceStatus, InvoiceStatusUpdate, LightningSweepRecord, PaymentAmounts,
-            Refund, RefundStatus, SweepStatus,
+            Refund, RefundDestinationType, RefundStatus, SweepStatus,
         },
     };
 
@@ -2343,7 +2471,7 @@ mod tests {
             .fetch_all(&store.pool)
             .await
             .unwrap();
-        assert_eq!(rows.len(), 5);
+        assert_eq!(rows.len(), 6);
         assert_eq!(rows[0].get::<i64, _>("version"), 1);
         assert_eq!(rows[0].get::<String, _>("name"), "initial_schema");
         assert_eq!(rows[1].get::<i64, _>("version"), 2);
@@ -2356,6 +2484,11 @@ mod tests {
         assert_eq!(
             rows[4].get::<String, _>("name"),
             "invoice_payment_link_idempotency_scope"
+        );
+        assert_eq!(rows[5].get::<i64, _>("version"), 6);
+        assert_eq!(
+            rows[5].get::<String, _>("name"),
+            "refund_idempotency_and_proofs"
         );
     }
 
@@ -2370,7 +2503,7 @@ mod tests {
                 .fetch_all(&store.pool)
                 .await
                 .unwrap();
-        assert_eq!(rows.len(), 5);
+        assert_eq!(rows.len(), 6);
         assert_eq!(rows[0].get::<i64, _>("version"), 1);
         assert_eq!(rows[0].get::<String, _>("name"), "initial_schema");
         assert_eq!(rows[1].get::<i64, _>("version"), 2);
@@ -2383,6 +2516,11 @@ mod tests {
         assert_eq!(
             rows[4].get::<String, _>("name"),
             "invoice_payment_link_idempotency_scope"
+        );
+        assert_eq!(rows[5].get::<i64, _>("version"), 6);
+        assert_eq!(
+            rows[5].get::<String, _>("name"),
+            "refund_idempotency_and_proofs"
         );
 
         clean_pg_store(&store).await;
@@ -2678,8 +2816,12 @@ mod tests {
             status: RefundStatus::Pending,
             amount_sats: 2_000,
             destination: Some("bc1qrefund".to_string()),
+            destination_type: Some(RefundDestinationType::BitcoinAddress),
             reason: Some("overpayment".to_string()),
             tx_id: None,
+            payment_proof: None,
+            failure_reason: None,
+            idempotency_key: Some("refund-key-1".to_string()),
             metadata: serde_json::json!({ "operator": "test" }),
             created_at: now,
             updated_at: now,
@@ -2692,6 +2834,7 @@ mod tests {
             .unwrap();
         refund.status = RefundStatus::Succeeded;
         refund.tx_id = Some("tx123".to_string());
+        refund.payment_proof = Some("proof123".to_string());
         refund.updated_at = Utc::now();
         refund.finalized_at = Some(refund.updated_at);
         let finalized = crate::events::refund_finalized_event(&refund, refund.updated_at);
@@ -2706,7 +2849,15 @@ mod tests {
             .unwrap();
         assert_eq!(found.status, RefundStatus::Succeeded);
         assert_eq!(found.tx_id.as_deref(), Some("tx123"));
+        assert_eq!(found.payment_proof.as_deref(), Some("proof123"));
+        assert_eq!(found.idempotency_key.as_deref(), Some("refund-key-1"));
         assert_eq!(store.refunds(&refund.store_id, 10).await.unwrap().len(), 1);
+        let idempotent = store
+            .refund_by_idempotency_key(&refund.store_id, "refund-key-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(idempotent.id, refund.id);
         let invoice_refunds = store
             .refunds_for_invoice(&refund.store_id, invoice.id)
             .await
