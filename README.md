@@ -450,6 +450,25 @@ The server loop and `sync-once` expire unpaid invoices after `expires_at`.
 Invoices in `payment_detected` are not expired by the expiry sweep; they stay
 pending until on-chain reconciliation can settle or reject them.
 
+## Refunds
+
+qpayd does not spend customer funds. On-chain stores use watch-only descriptors,
+and Lightning invoice creation should use limited backend credentials. Handle
+refunds from the wallet, treasury, or Lightning node that controls the funds.
+
+Use qpayd webhooks to drive the refund workflow in your app:
+
+- `invoice.partially_paid`: decide whether to ask the customer to finish payment
+  or refund the observed `paid_sats`.
+- `invoice.paid_late`: hold fulfillment and refund or manually approve after
+  review.
+- `invoice.settled` with `overpaid_sats > 0`: fulfill normally and refund the
+  overpaid amount if your store policy requires it.
+
+If your checkout needs customer refund destinations, collect them in your app
+and put an order reference in invoice `metadata`. qpayd will echo that metadata
+in signed webhooks.
+
 ## Webhooks
 
 When `webhook_url` is configured, qpayd records each event in the configured
