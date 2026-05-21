@@ -84,6 +84,24 @@ If `payout_token_env` is configured, refund create, finalize, fail, and cancel
 requests must use that token. If it is omitted, refund mutations use
 `admin_token_env` when configured, otherwise `api_token_env`.
 
+Set `admin_token_can_payout = true` on a store when the admin token should also
+be accepted for payout actions. This enables broader admin privilege; keep it
+`false` unless the deployment needs one operator token.
+
+```toml
+[[stores]]
+id = "main"
+admin_token_env = "QPAYD_MAIN_ADMIN_TOKEN"
+payout_token_env = "QPAYD_MAIN_PAYOUT_TOKEN"
+admin_token_can_payout = true
+```
+
+Verify the setting with one small refund request against
+`POST /v1/stores/main/invoices/$INVOICE_ID/refunds`: use the admin token and
+confirm qpayd returns `2xx` when `admin_token_can_payout = true`. Set it back to
+`false`, reload qpayd, repeat the same request, and confirm qpayd returns
+`401 Unauthorized`.
+
 Approve a refund that crosses `manual_approval_threshold_sats`:
 
 ```sh

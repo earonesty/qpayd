@@ -46,6 +46,10 @@ pub fn router(state: AppState) -> Router {
         .route("/admin", get(admin_portal))
         .route("/healthz", get(healthz))
         .route(
+            "/v1/admin/session",
+            get(admin_session).options(admin_session_preflight),
+        )
+        .route(
             "/v1/public/stores/{store_id}/payment-links/{payment_link_id}/invoices",
             post(create_public_payment_link_invoice).options(public_payment_link_invoice_preflight),
         )
@@ -155,11 +159,12 @@ async fn admin_portal(State(state): State<AppState>) -> Result<Response, ApiErro
     let asset_source = admin.asset_source.as_deref().ok_or(ApiError::bad_request(
         "admin asset source is not configured",
     ))?;
-    let store_id = admin
+    let store_id_attr = admin
         .store_id
         .as_deref()
-        .or_else(|| (state.config.stores.len() == 1).then(|| state.config.stores[0].id.as_str()));
-    let store_id = store_id.ok_or(ApiError::bad_request("admin store id is not configured"))?;
+        .or_else(|| (state.config.stores.len() == 1).then(|| state.config.stores[0].id.as_str()))
+        .map(|store_id| format!(r#" data-store-id="{}""#, escape_attr(store_id)))
+        .unwrap_or_default();
     let integrity = admin.asset_integrity.as_deref();
     let crossorigin = if asset_source.starts_with("https://") {
         r#" crossorigin="anonymous""#
@@ -179,11 +184,10 @@ async fn admin_portal(State(state): State<AppState>) -> Result<Response, ApiErro
 </head>
 <body>
   <main id="qpayd-admin"></main>
-  <script type="module" src="{asset_source}" data-qpayd-admin data-target="#qpayd-admin" data-store-id="{store_id}"{integrity_attr}{crossorigin}></script>
+  <script type="module" src="{asset_source}" data-qpayd-admin data-target="#qpayd-admin"{store_id_attr}{integrity_attr}{crossorigin}></script>
 </body>
 </html>"##,
         asset_source = escape_attr(asset_source),
-        store_id = escape_attr(store_id),
     );
     let mut response = Html(html).into_response();
     response.headers_mut().insert(
@@ -200,6 +204,50 @@ async fn admin_portal(State(state): State<AppState>) -> Result<Response, ApiErro
         HeaderValue::from_static("camera=(self)"),
     );
     Ok(response)
+}
+
+async fn admin_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AdminSessionResponse>, ApiError> {
+    let token = bearer_token(&headers)?;
+    let mut stores = Vec::new();
+    for store in &state.config.stores {
+        if !admin_origin_allowed_for_store(store, &headers)? {
+            continue;
+        }
+        let admin = token_matches(token, &store.admin_token(&state.config.auth)?);
+        let payout = token_matches(token, &store.payout_token(&state.config.auth)?)
+            || (admin && store.admin_token_can_payout(&state.config.auth));
+        if admin || payout {
+            let mut scopes = Vec::new();
+            if admin {
+                scopes.push("admin".to_string());
+            }
+            if payout {
+                scopes.push("payout".to_string());
+            }
+            stores.push(AdminSessionStore {
+                id: store.id.clone(),
+                name: store.name.clone(),
+                scopes,
+            });
+        }
+    }
+    if stores.is_empty() {
+        return Err(ApiError::unauthorized());
+    }
+    Ok(Json(AdminSessionResponse { stores }))
+}
+
+async fn admin_session_preflight(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    Ok(preflight_response(admin_cors_for_session(
+        &state.config,
+        &headers,
+    )?))
 }
 
 async fn create_invoice(
@@ -733,7 +781,7 @@ async fn list_refunds(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_admin(&state.config.auth, store_cfg, &headers)?;
+    authorize_admin_or_payout(&state.config.auth, store_cfg, &headers)?;
     Ok(Json(
         state
             .store
@@ -751,7 +799,7 @@ async fn get_refund(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize_admin(&state.config.auth, store_cfg, &headers)?;
+    authorize_admin_or_payout(&state.config.auth, store_cfg, &headers)?;
     let refund = state
         .store
         .refund(&store_id, refund_id)
@@ -1125,10 +1173,33 @@ fn authorize_payout(
     store: &crate::config::StoreConfig,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
-    authorize_with_token(&store.payout_token(auth)?, headers)
+    match authorize_with_token(&store.payout_token(auth)?, headers) {
+        Ok(()) => Ok(()),
+        Err(error) if store.admin_token_can_payout(auth) => {
+            authorize_with_token(&store.admin_token(auth)?, headers).map_err(|_| error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn authorize_admin_or_payout(
+    auth: &crate::config::AuthConfig,
+    store: &crate::config::StoreConfig,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    authorize_admin(auth, store, headers).or_else(|_| authorize_payout(auth, store, headers))
 }
 
 fn authorize_with_token(expected: &str, headers: &HeaderMap) -> Result<(), ApiError> {
+    let token = bearer_token(headers)?;
+    if token_matches(token, expected) {
+        Ok(())
+    } else {
+        Err(ApiError::unauthorized())
+    }
+}
+
+fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
     let Some(value) = headers.get(header::AUTHORIZATION) else {
         return Err(ApiError::unauthorized());
     };
@@ -1138,12 +1209,11 @@ fn authorize_with_token(expected: &str, headers: &HeaderMap) -> Result<(), ApiEr
     let Some(token) = value.strip_prefix("Bearer ") else {
         return Err(ApiError::unauthorized());
     };
+    Ok(token)
+}
 
-    if subtle::ConstantTimeEq::ct_eq(token.as_bytes(), expected.as_bytes()).into() {
-        Ok(())
-    } else {
-        Err(ApiError::unauthorized())
-    }
+fn token_matches(token: &str, expected: &str) -> bool {
+    subtle::ConstantTimeEq::ct_eq(token.as_bytes(), expected.as_bytes()).into()
 }
 
 fn sats_for(amount: Decimal, btc_quote_rate: Decimal) -> anyhow::Result<u64> {
@@ -1234,13 +1304,21 @@ async fn admin_cors_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    let Some(store_id) = admin_store_id_from_path(request.uri().path()) else {
-        return next.run(request).await;
+    let cors = if request.uri().path() == "/v1/admin/session" {
+        match admin_cors_for_session(&state.config, request.headers()) {
+            Ok(cors) => Some(cors),
+            Err(error) => return error.into_response(),
+        }
+    } else {
+        let Some(store_id) = admin_store_id_from_path(request.uri().path()) else {
+            return next.run(request).await;
+        };
+        match admin_cors_for_store(&state.config, store_id, request.headers()) {
+            Ok(cors) => Some(cors),
+            Err(error) => return error.into_response(),
+        }
     };
-    let cors = match admin_cors_for_store(&state.config, store_id, request.headers()) {
-        Ok(cors) => cors,
-        Err(error) => return error.into_response(),
-    };
+    let cors = cors.expect("admin CORS branch sets a policy");
     if request.method() == Method::OPTIONS {
         return preflight_response(cors);
     }
@@ -1272,6 +1350,41 @@ fn admin_cors_for_store(
         return Err(ApiError::forbidden("admin origin is not allowed"));
     }
     public_cors_for_allowed_origins(&store.admin_allowed_origins, headers)
+}
+
+fn admin_cors_for_session(config: &Config, headers: &HeaderMap) -> Result<PublicCors, ApiError> {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return Ok(PublicCors::NoBrowserOrigin);
+    };
+    let origin_str = origin
+        .to_str()
+        .map_err(|_| ApiError::forbidden("origin not allowed"))?;
+    if config.stores.iter().any(|store| {
+        store
+            .admin_allowed_origins
+            .iter()
+            .any(|allowed| same_origin(allowed, origin_str))
+    }) {
+        Ok(PublicCors::Origin(origin.clone()))
+    } else {
+        Err(ApiError::forbidden("admin origin is not allowed"))
+    }
+}
+
+fn admin_origin_allowed_for_store(
+    store: &StoreConfig,
+    headers: &HeaderMap,
+) -> Result<bool, ApiError> {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return Ok(true);
+    };
+    let origin_str = origin
+        .to_str()
+        .map_err(|_| ApiError::forbidden("origin not allowed"))?;
+    Ok(store
+        .admin_allowed_origins
+        .iter()
+        .any(|allowed| same_origin(allowed, origin_str)))
 }
 
 fn admin_csp(asset_source: &str) -> String {
@@ -1463,6 +1576,18 @@ pub struct FinalizeRefundRequest {
 #[derive(Debug, Deserialize)]
 pub struct FailRefundRequest {
     pub failure_reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminSessionResponse {
+    pub stores: Vec<AdminSessionStore>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminSessionStore {
+    pub id: String,
+    pub name: String,
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2025,6 +2150,148 @@ mod tests {
                     .uri("/v1/stores/main/invoices")
                     .header(header::AUTHORIZATION, "Bearer admin-token")
                     .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_session_routes_token_to_authorized_store_scopes() {
+        unsafe {
+            std::env::set_var("QPAYD_MAIN_API_TOKEN", "test-token");
+            std::env::set_var("QPAYD_MAIN_ADMIN_TOKEN", "admin-token");
+            std::env::set_var("QPAYD_MAIN_PAYOUT_TOKEN", "payout-token");
+        }
+        let mut config = test_config();
+        config.server.admin.enabled = true;
+        config.server.admin.asset_source = Some("/admin.js".to_string());
+        config.stores[0].admin_token_env = Some("QPAYD_MAIN_ADMIN_TOKEN".to_string());
+        config.stores[0].payout_token_env = Some("QPAYD_MAIN_PAYOUT_TOKEN".to_string());
+        config.stores[0].admin_allowed_origins = vec!["https://pay.example".to_string()];
+        let app = test_app_with_config(config).await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/admin/session")
+                    .header(header::AUTHORIZATION, "Bearer payout-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["stores"][0]["id"], "main");
+        assert_eq!(body["stores"][0]["scopes"], serde_json::json!(["payout"]));
+
+        let denied = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/admin/session")
+                    .header(header::AUTHORIZATION, "Bearer nope")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_session_filters_authorized_stores_by_origin() {
+        unsafe {
+            std::env::set_var("QPAYD_MAIN_API_TOKEN", "test-token");
+            std::env::set_var("QPAYD_SECOND_API_TOKEN", "second-token");
+            std::env::set_var("QPAYD_GLOBAL_ADMIN_TOKEN", "global-admin-token");
+        }
+        let mut config = test_config();
+        config.auth.admin_token_env = Some("QPAYD_GLOBAL_ADMIN_TOKEN".to_string());
+        config.stores[0].admin_allowed_origins = vec!["https://main.example".to_string()];
+        let mut second = config.stores[0].clone();
+        second.id = "second".to_string();
+        second.name = "Second Store".to_string();
+        second.api_token_env = Some("QPAYD_SECOND_API_TOKEN".to_string());
+        second.admin_allowed_origins = vec!["https://second.example".to_string()];
+        config.stores.push(second);
+        let app = test_app_with_config(config).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/admin/session")
+                    .header(header::ORIGIN, "https://second.example")
+                    .header(header::AUTHORIZATION, "Bearer global-admin-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["stores"].as_array().unwrap().len(), 1);
+        assert_eq!(body["stores"][0]["id"], "second");
+    }
+
+    #[tokio::test]
+    async fn admin_token_can_payout_when_configured() {
+        unsafe {
+            std::env::set_var("QPAYD_MAIN_API_TOKEN", "test-token");
+            std::env::set_var("QPAYD_MAIN_ADMIN_TOKEN", "admin-token");
+            std::env::set_var("QPAYD_MAIN_PAYOUT_TOKEN", "payout-token");
+        }
+        let mut config = test_config();
+        config.stores[0].admin_token_env = Some("QPAYD_MAIN_ADMIN_TOKEN".to_string());
+        config.stores[0].payout_token_env = Some("QPAYD_MAIN_PAYOUT_TOKEN".to_string());
+        config.stores[0].admin_token_can_payout = Some(true);
+        let (app, store) = test_app_and_store_with_config(config).await;
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/stores/main/invoices")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"amount":"10.00","currency":"USD"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let created: serde_json::Value =
+            serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let invoice_id = uuid::Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+        store
+            .update_invoice_payment_amounts(
+                "main",
+                invoice_id,
+                PaymentAmounts {
+                    paid_sats: 12_000,
+                    confirmed_sats: 12_000,
+                    unconfirmed_sats: 0,
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+
+        let allowed = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/stores/main/invoices/{invoice_id}/refunds"))
+                    .header(header::AUTHORIZATION, "Bearer admin-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"amount_sats":2000}"#))
                     .unwrap(),
             )
             .await
@@ -2827,6 +3094,35 @@ mod tests {
         assert!(body.contains("data-store-id=\"main\""));
         assert!(body.contains("integrity=\"sha384-testdigest\""));
         assert!(body.contains("crossorigin=\"anonymous\""));
+    }
+
+    #[tokio::test]
+    async fn admin_portal_can_defer_store_selection_to_token_session() {
+        let mut config = test_config();
+        config.server.admin.enabled = true;
+        config.server.admin.store_id = None;
+        config.server.admin.asset_source = Some("/admin.js".to_string());
+        let mut second = config.stores[0].clone();
+        second.id = "second".to_string();
+        second.name = "Second Store".to_string();
+        second.api_token_env = Some("QPAYD_SECOND_API_TOKEN".to_string());
+        config.stores.push(second);
+        let app = test_app_with_config(config).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("data-qpayd-admin"));
+        assert!(!body.contains("data-store-id="));
     }
 
     #[tokio::test]

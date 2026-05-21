@@ -24,6 +24,8 @@ pub struct AuthConfig {
     pub admin_token_env: Option<String>,
     #[serde(alias = "refund_token_env")]
     pub payout_token_env: Option<String>,
+    #[serde(default)]
+    pub admin_token_can_payout: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,6 +70,7 @@ pub struct StoreConfig {
     pub admin_token_env: Option<String>,
     #[serde(alias = "refund_token_env")]
     pub payout_token_env: Option<String>,
+    pub admin_token_can_payout: Option<bool>,
     #[serde(default)]
     pub public_allowed_origins: Vec<String>,
     #[serde(default)]
@@ -480,6 +483,11 @@ impl StoreConfig {
         token_from_env(self.payout_token_env(auth)?)
     }
 
+    pub fn admin_token_can_payout(&self, auth: &AuthConfig) -> bool {
+        self.admin_token_can_payout
+            .unwrap_or(auth.admin_token_can_payout)
+    }
+
     pub fn api_token_env<'a>(&'a self, auth: &'a AuthConfig) -> anyhow::Result<&'a str> {
         self.api_token_env
             .as_deref()
@@ -754,12 +762,10 @@ fn validate_admin_portal(admin: &AdminPortalConfig, stores: &[StoreConfig]) -> a
         bail!("server.admin.asset_source must be an https URL or absolute same-origin path");
     }
 
-    if let Some(store_id) = &admin.store_id {
-        if !stores.iter().any(|store| store.id == *store_id) {
-            bail!("server.admin.store_id {store_id:?} does not match a configured store");
-        }
-    } else if stores.len() != 1 {
-        bail!("server.admin.store_id is required when more than one store is configured");
+    if let Some(store_id) = &admin.store_id
+        && !stores.iter().any(|store| store.id == *store_id)
+    {
+        bail!("server.admin.store_id {store_id:?} does not match a configured store");
     }
     Ok(())
 }
