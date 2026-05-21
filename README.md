@@ -264,7 +264,7 @@ To run migrations automatically before the server starts, set:
 export QPAYD_MIGRATE_ON_BOOT=true
 ```
 
-Reconcile on-chain payments:
+Reconcile payments and expire due invoices:
 
 ```sh
 qpayd --config qpayd.toml sync-once
@@ -429,6 +429,10 @@ Use `payment_detected` as a pending on-chain state: qpayd has seen enough
 unconfirmed sats, but the payment is not confirmed yet. Use `partially_paid`
 for customer support or retry flows. Use `expired` to release inventory. Use
 `paid_late` for manual handling after the invoice window has closed.
+
+The server loop and `sync-once` expire unpaid invoices after `expires_at`.
+Invoices in `payment_detected` are not expired by the expiry sweep; they stay
+pending until on-chain reconciliation can settle or reject them.
 
 ## Webhooks
 
