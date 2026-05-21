@@ -275,6 +275,7 @@ qpayd --config qpayd.toml sync-once
 ```sh
 curl -sS https://pay.example.com/v1/stores/main/invoices \
   -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN" \
+  -H "Idempotency-Key: ord_123" \
   -H "Content-Type: application/json" \
   -d '{
     "amount": "25.00",
@@ -283,8 +284,12 @@ curl -sS https://pay.example.com/v1/stores/main/invoices \
       "site": "example.com",
       "order_id": "ord_123"
     }
-  }'
+}'
 ```
+
+Use one `Idempotency-Key` per checkout attempt or order. Retrying invoice
+creation with the same key on the same store returns the original invoice, so a
+network retry does not create a second address or Lightning invoice.
 
 Response:
 
@@ -348,6 +353,7 @@ Create an invoice from browser code:
 
 ```sh
 curl -sS -X POST \
+  -H "Idempotency-Key: donation-click-123" \
   https://pay.example.com/v1/public/stores/main/payment-links/donate-10/invoices
 ```
 
@@ -401,7 +407,8 @@ like a hosted checkout while keeping the UI in your site:
     openPaymentLink({
       baseUrl: "https://pay.example.com",
       storeId: "main",
-      paymentLinkId: "donate-10"
+      paymentLinkId: "donate-10",
+      idempotencyKey: "cart-or-order-id"
     });
   });
 </script>

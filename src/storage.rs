@@ -26,6 +26,11 @@ pub trait Store: Send + Sync {
         webhook_url: Option<&str>,
     ) -> anyhow::Result<()>;
     async fn invoice(&self, store_id: &str, id: Uuid) -> anyhow::Result<Option<Invoice>>;
+    async fn invoice_by_idempotency_key(
+        &self,
+        store_id: &str,
+        idempotency_key: &str,
+    ) -> anyhow::Result<Option<Invoice>>;
     async fn active_onchain_invoices(&self, store_id: &str) -> anyhow::Result<Vec<Invoice>>;
     async fn active_lightning_invoices(&self, store_id: &str) -> anyhow::Result<Vec<Invoice>>;
     async fn update_invoice_status(
@@ -162,9 +167,9 @@ impl Store for SqliteStore {
             INSERT INTO invoices (
                 id, store_id, status, amount, currency, btc_amount_sats,
                 onchain_address, onchain_address_index, onchain_script_pubkey,
-                lightning_bolt11, lightning_payment_hash, rate_source, rate,
+                lightning_bolt11, lightning_payment_hash, idempotency_key, rate_source, rate,
                 metadata, expires_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(invoice.id.to_string())
@@ -178,6 +183,7 @@ impl Store for SqliteStore {
         .bind(&invoice.onchain_script_pubkey)
         .bind(&invoice.lightning_bolt11)
         .bind(&invoice.lightning_payment_hash)
+        .bind(&invoice.idempotency_key)
         .bind(&invoice.rate_source)
         .bind(invoice.rate.to_string())
         .bind(invoice.metadata.to_string())
@@ -203,7 +209,7 @@ impl Store for SqliteStore {
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
                    expires_at, created_at, updated_at
             FROM invoices
             WHERE store_id = ? AND id = ?
@@ -220,12 +226,38 @@ impl Store for SqliteStore {
         Ok(Some(invoice_from_row(row)?))
     }
 
+    async fn invoice_by_idempotency_key(
+        &self,
+        store_id: &str,
+        idempotency_key: &str,
+    ) -> anyhow::Result<Option<Invoice>> {
+        let Some(row) = sqlx::query(
+            r#"
+            SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                   onchain_address, onchain_address_index, onchain_script_pubkey,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                   expires_at, created_at, updated_at
+            FROM invoices
+            WHERE store_id = ? AND idempotency_key = ?
+            "#,
+        )
+        .bind(store_id)
+        .bind(idempotency_key)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(invoice_from_row(row)?))
+    }
+
     async fn active_onchain_invoices(&self, store_id: &str) -> anyhow::Result<Vec<Invoice>> {
         let rows = sqlx::query(
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
                    expires_at, created_at, updated_at
             FROM invoices
             WHERE store_id = ?
@@ -245,7 +277,7 @@ impl Store for SqliteStore {
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
                    expires_at, created_at, updated_at
             FROM invoices
             WHERE store_id = ?
@@ -485,9 +517,9 @@ impl Store for PostgresStore {
             INSERT INTO qpayd_invoices (
                 id, store_id, status, amount, currency, btc_amount_sats,
                 onchain_address, onchain_address_index, onchain_script_pubkey,
-                lightning_bolt11, lightning_payment_hash, rate_source, rate,
+                lightning_bolt11, lightning_payment_hash, idempotency_key, rate_source, rate,
                 metadata, expires_at, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             "#,
         )
         .bind(invoice.id.to_string())
@@ -501,6 +533,7 @@ impl Store for PostgresStore {
         .bind(&invoice.onchain_script_pubkey)
         .bind(&invoice.lightning_bolt11)
         .bind(&invoice.lightning_payment_hash)
+        .bind(&invoice.idempotency_key)
         .bind(&invoice.rate_source)
         .bind(invoice.rate.to_string())
         .bind(invoice.metadata.to_string())
@@ -526,7 +559,7 @@ impl Store for PostgresStore {
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
                    expires_at, created_at, updated_at
             FROM qpayd_invoices
             WHERE store_id = $1 AND id = $2
@@ -543,12 +576,38 @@ impl Store for PostgresStore {
         Ok(Some(invoice_from_pg_row(row)?))
     }
 
+    async fn invoice_by_idempotency_key(
+        &self,
+        store_id: &str,
+        idempotency_key: &str,
+    ) -> anyhow::Result<Option<Invoice>> {
+        let Some(row) = sqlx::query(
+            r#"
+            SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                   onchain_address, onchain_address_index, onchain_script_pubkey,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                   expires_at, created_at, updated_at
+            FROM qpayd_invoices
+            WHERE store_id = $1 AND idempotency_key = $2
+            "#,
+        )
+        .bind(store_id)
+        .bind(idempotency_key)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(invoice_from_pg_row(row)?))
+    }
+
     async fn active_onchain_invoices(&self, store_id: &str) -> anyhow::Result<Vec<Invoice>> {
         let rows = sqlx::query(
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
                    expires_at, created_at, updated_at
             FROM qpayd_invoices
             WHERE store_id = $1
@@ -568,7 +627,7 @@ impl Store for PostgresStore {
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
-                   rate_source, rate, lightning_bolt11, lightning_payment_hash, metadata,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
                    expires_at, created_at, updated_at
             FROM qpayd_invoices
             WHERE store_id = $1
@@ -756,17 +815,18 @@ struct Migration {
     statements: &'static [&'static str],
 }
 
-const SQLITE_MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial_schema",
-    statements: &[
-        r#"
+const SQLITE_MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial_schema",
+        statements: &[
+            r#"
         CREATE TABLE IF NOT EXISTS store_counters (
             store_id TEXT PRIMARY KEY NOT NULL,
             next_onchain_index INTEGER NOT NULL
         )
         "#,
-        r#"
+            r#"
         CREATE TABLE IF NOT EXISTS invoices (
             id TEXT PRIMARY KEY NOT NULL,
             store_id TEXT NOT NULL,
@@ -787,11 +847,11 @@ const SQLITE_MIGRATIONS: &[Migration] = &[Migration {
             updated_at TEXT NOT NULL
         )
         "#,
-        r#"
+            r#"
         CREATE INDEX IF NOT EXISTS invoices_store_created_idx
         ON invoices (store_id, created_at)
         "#,
-        r#"
+            r#"
         CREATE TABLE IF NOT EXISTS events (
             id TEXT PRIMARY KEY NOT NULL,
             store_id TEXT NOT NULL,
@@ -801,11 +861,11 @@ const SQLITE_MIGRATIONS: &[Migration] = &[Migration {
             created_at TEXT NOT NULL
         )
         "#,
-        r#"
+            r#"
         CREATE INDEX IF NOT EXISTS events_store_created_idx
         ON events (store_id, created_at)
         "#,
-        r#"
+            r#"
         CREATE TABLE IF NOT EXISTS webhook_deliveries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_id TEXT NOT NULL,
@@ -821,24 +881,40 @@ const SQLITE_MIGRATIONS: &[Migration] = &[Migration {
             FOREIGN KEY(event_id) REFERENCES events(id)
         )
         "#,
-        r#"
+            r#"
         CREATE INDEX IF NOT EXISTS webhook_deliveries_due_idx
         ON webhook_deliveries (status, next_attempt_at)
         "#,
-    ],
-}];
+        ],
+    },
+    Migration {
+        version: 2,
+        name: "invoice_idempotency_keys",
+        statements: &[
+            r#"
+        ALTER TABLE invoices ADD COLUMN idempotency_key TEXT
+        "#,
+            r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS invoices_store_idempotency_key_idx
+        ON invoices (store_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL
+        "#,
+        ],
+    },
+];
 
-const POSTGRES_MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial_schema",
-    statements: &[
-        r#"
+const POSTGRES_MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial_schema",
+        statements: &[
+            r#"
         CREATE TABLE IF NOT EXISTS qpayd_store_counters (
             store_id TEXT PRIMARY KEY NOT NULL,
             next_onchain_index BIGINT NOT NULL
         )
         "#,
-        r#"
+            r#"
         CREATE TABLE IF NOT EXISTS qpayd_invoices (
             id TEXT PRIMARY KEY NOT NULL,
             store_id TEXT NOT NULL,
@@ -859,11 +935,11 @@ const POSTGRES_MIGRATIONS: &[Migration] = &[Migration {
             updated_at TEXT NOT NULL
         )
         "#,
-        r#"
+            r#"
         CREATE INDEX IF NOT EXISTS qpayd_invoices_store_created_idx
         ON qpayd_invoices (store_id, created_at)
         "#,
-        r#"
+            r#"
         CREATE TABLE IF NOT EXISTS qpayd_events (
             id TEXT PRIMARY KEY NOT NULL,
             store_id TEXT NOT NULL,
@@ -873,11 +949,11 @@ const POSTGRES_MIGRATIONS: &[Migration] = &[Migration {
             created_at TEXT NOT NULL
         )
         "#,
-        r#"
+            r#"
         CREATE INDEX IF NOT EXISTS qpayd_events_store_created_idx
         ON qpayd_events (store_id, created_at)
         "#,
-        r#"
+            r#"
         CREATE TABLE IF NOT EXISTS qpayd_webhook_deliveries (
             id BIGSERIAL PRIMARY KEY,
             event_id TEXT NOT NULL REFERENCES qpayd_events(id),
@@ -892,12 +968,27 @@ const POSTGRES_MIGRATIONS: &[Migration] = &[Migration {
             updated_at TEXT NOT NULL
         )
         "#,
-        r#"
+            r#"
         CREATE INDEX IF NOT EXISTS qpayd_webhook_deliveries_due_idx
         ON qpayd_webhook_deliveries (status, next_attempt_at)
         "#,
-    ],
-}];
+        ],
+    },
+    Migration {
+        version: 2,
+        name: "invoice_idempotency_keys",
+        statements: &[
+            r#"
+        ALTER TABLE qpayd_invoices ADD COLUMN idempotency_key TEXT
+        "#,
+            r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS qpayd_invoices_store_idempotency_key_idx
+        ON qpayd_invoices (store_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL
+        "#,
+        ],
+    },
+];
 
 async fn migrate_sqlite(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(
@@ -1089,6 +1180,7 @@ fn invoice_from_row(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<Invoice> {
         onchain_script_pubkey: row.get("onchain_script_pubkey"),
         lightning_bolt11: row.get("lightning_bolt11"),
         lightning_payment_hash: row.get("lightning_payment_hash"),
+        idempotency_key: row.get("idempotency_key"),
         rate_source: row.get("rate_source"),
         rate: row.get::<String, _>("rate").parse::<Decimal>()?,
         metadata: serde_json::from_str(row.get::<String, _>("metadata").as_str())?,
@@ -1116,6 +1208,7 @@ fn invoice_from_pg_row(row: sqlx::postgres::PgRow) -> anyhow::Result<Invoice> {
         onchain_script_pubkey: row.get("onchain_script_pubkey"),
         lightning_bolt11: row.get("lightning_bolt11"),
         lightning_payment_hash: row.get("lightning_payment_hash"),
+        idempotency_key: row.get("idempotency_key"),
         rate_source: row.get("rate_source"),
         rate: row.get::<String, _>("rate").parse::<Decimal>()?,
         metadata: serde_json::from_str(row.get::<String, _>("metadata").as_str())?,
@@ -1198,6 +1291,12 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idempotency_key_finds_original_invoice() {
+        let store = test_store().await;
+        idempotency_key_finds_original_invoice_for(store.as_ref()).await;
+    }
+
+    #[tokio::test]
     async fn sqlite_migrate_records_initial_schema_once() {
         let path = std::env::temp_dir().join(format!("qpayd-migration-test-{}.db", Uuid::new_v4()));
         let store = SqliteStore::connect(&format!("sqlite://{}", path.display()))
@@ -1211,9 +1310,11 @@ mod tests {
             .fetch_all(&store.pool)
             .await
             .unwrap();
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].get::<i64, _>("version"), 1);
         assert_eq!(rows[0].get::<String, _>("name"), "initial_schema");
+        assert_eq!(rows[1].get::<i64, _>("version"), 2);
+        assert_eq!(rows[1].get::<String, _>("name"), "invoice_idempotency_keys");
     }
 
     #[tokio::test]
@@ -1227,9 +1328,11 @@ mod tests {
                 .fetch_all(&store.pool)
                 .await
                 .unwrap();
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].get::<i64, _>("version"), 1);
         assert_eq!(rows[0].get::<String, _>("name"), "initial_schema");
+        assert_eq!(rows[1].get::<i64, _>("version"), 2);
+        assert_eq!(rows[1].get::<String, _>("name"), "invoice_idempotency_keys");
 
         clean_pg_store(&store).await;
         insert_invoice_persists_event_and_webhook_delivery_for(&store).await;
@@ -1239,6 +1342,9 @@ mod tests {
 
         clean_pg_store(&store).await;
         duplicate_status_event_does_not_enqueue_twice_for(&store).await;
+
+        clean_pg_store(&store).await;
+        idempotency_key_finds_original_invoice_for(&store).await;
     }
 
     async fn insert_invoice_persists_event_and_webhook_delivery_for(store: &dyn Store) {
@@ -1322,6 +1428,23 @@ mod tests {
         assert_eq!(due.len(), 2);
     }
 
+    async fn idempotency_key_finds_original_invoice_for(store: &dyn Store) {
+        let mut invoice = test_invoice(InvoiceStatus::New);
+        invoice.idempotency_key = Some("retry-key-1".to_string());
+        let event = invoice_created_event(&invoice, invoice.created_at);
+
+        store.insert_invoice(&invoice, &event, None).await.unwrap();
+
+        let found = store
+            .invoice_by_idempotency_key(&invoice.store_id, "retry-key-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, invoice.id);
+        assert_eq!(found.onchain_address_index, invoice.onchain_address_index);
+        assert_eq!(found.idempotency_key.as_deref(), Some("retry-key-1"));
+    }
+
     async fn test_store() -> Box<dyn Store> {
         let path = std::env::temp_dir().join(format!("qpayd-test-{}.db", Uuid::new_v4()));
         let store = SqliteStore::connect(&format!("sqlite://{}", path.display()))
@@ -1389,6 +1512,7 @@ mod tests {
             onchain_script_pubkey: Some("0014".to_string()),
             lightning_bolt11: None,
             lightning_payment_hash: None,
+            idempotency_key: None,
             rate_source: "kraken".to_string(),
             rate: Decimal::from(100_000),
             metadata: serde_json::json!({ "order_id": "ord_123" }),

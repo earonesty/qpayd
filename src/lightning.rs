@@ -608,6 +608,7 @@ mod tests {
                 onchain_script_pubkey: None,
                 lightning_bolt11: Some("lnbc1234test".to_string()),
                 lightning_payment_hash: Some("lnbc1234test".to_string()),
+                idempotency_key: None,
                 rate_source: "test".to_string(),
                 rate: Decimal::ONE,
                 metadata: serde_json::json!({}),

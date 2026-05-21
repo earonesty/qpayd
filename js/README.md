@@ -14,11 +14,15 @@ from a configured public payment link:
     openPaymentLink({
       baseUrl: "https://pay.example.com",
       storeId: "main",
-      paymentLinkId: "donate-10"
+      paymentLinkId: "donate-10",
+      idempotencyKey: "cart-or-order-id"
     });
   });
 </script>
 ```
+
+Pass a stable `idempotencyKey` for the checkout attempt so browser retries
+return the same qpayd invoice.
 
 Backends can also create invoices with the qpayd admin API and pass the invoice
 JSON into `openInvoiceModal({ client, invoice })`.

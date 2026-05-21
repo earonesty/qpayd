@@ -16,6 +16,7 @@ pub struct Invoice {
     pub onchain_script_pubkey: Option<String>,
     pub lightning_bolt11: Option<String>,
     pub lightning_payment_hash: Option<String>,
+    pub idempotency_key: Option<String>,
     pub rate_source: String,
     pub rate: Decimal,
     pub metadata: serde_json::Value,
