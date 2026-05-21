@@ -6,10 +6,13 @@ order: 40
 
 # Refund workflows
 
-qpayd does not spend customer funds. On-chain stores use watch-only
-descriptors, and Lightning invoice creation should use limited backend
-credentials. Refunds are tracked as case-management records linked to the
-original invoice.
+qpayd records refund requests and links them to the original invoice. The actual
+refund payment is sent from the wallet or Lightning node that controls the
+money.
+
+For on-chain stores, qpayd normally has a watch-only descriptor. For Lightning,
+invoice creation should use limited credentials. Keep full spending credentials
+in the wallet, node, or private sweep deployment.
 
 Read refund state for an invoice:
 
@@ -31,8 +34,7 @@ curl -sS https://pay.example.com/v1/stores/main/invoices/$INVOICE_ID/refunds \
   }'
 ```
 
-Finalize it after the wallet or Lightning node that controls funds completes
-the refund:
+Finalize it after the refund payment is sent:
 
 ```sh
 curl -sS -X POST https://pay.example.com/v1/stores/main/refunds/$REFUND_ID/finalize \
@@ -50,4 +52,3 @@ curl -sS -X POST https://pay.example.com/v1/stores/main/refunds/$REFUND_ID/cance
 
 Pending and finalized refunds count against the invoice refundable balance.
 Canceled refunds do not.
-
