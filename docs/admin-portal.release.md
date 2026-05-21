@@ -26,11 +26,13 @@ asset_integrity = "{{ADMIN_ASSET_INTEGRITY}}"
 [[stores]]
 id = "main"
 admin_allowed_origins = ["https://pay.example.com"]
+admin_token_env = "QPAYD_MAIN_ADMIN_TOKEN"
 ```
 
-Change `store_id` and `admin_allowed_origins` for your deployment. The origin
-must be the browser origin that serves the admin page. If qpayd serves `/admin`
-from the same origin as the API, use that origin.
+Change `store_id`, `admin_allowed_origins`, and `admin_token_env` for your
+deployment. The origin must be the browser origin that serves the admin page. If
+qpayd serves `/admin` from the same origin as the API, use that origin. If
+`admin_token_env` is omitted, admin API requests use the store `api_token_env`.
 
 ## Security model
 

@@ -5,8 +5,6 @@ use reqwest::Url;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
-use crate::invoice::RefundDestinationType;
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -57,6 +55,8 @@ pub struct StoreConfig {
     pub id: String,
     pub name: String,
     pub api_token_env: String,
+    pub admin_token_env: Option<String>,
+    pub refund_token_env: Option<String>,
     #[serde(default)]
     pub public_allowed_origins: Vec<String>,
     #[serde(default)]
@@ -135,8 +135,6 @@ pub struct HotWalletConfig {
     pub max_refund_sats: u64,
     pub daily_refund_limit_sats: u64,
     pub manual_approval_threshold_sats: Option<u64>,
-    #[serde(default)]
-    pub allowed_refund_destination_types: Vec<RefundDestinationType>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,22 +167,6 @@ impl HotWalletBackend {
             Self::Phoenixd => "phoenixd",
             Self::Barkd => "barkd",
             Self::Bitcoind => "bitcoind",
-        }
-    }
-
-    pub fn supports_refund_destination_type(
-        &self,
-        destination_type: RefundDestinationType,
-    ) -> bool {
-        match self {
-            Self::Phoenixd | Self::Barkd => matches!(
-                destination_type,
-                RefundDestinationType::LightningInvoice | RefundDestinationType::Lnurl
-            ),
-            Self::Bitcoind => matches!(
-                destination_type,
-                RefundDestinationType::BitcoinAddress | RefundDestinationType::BitcoinUri
-            ),
         }
     }
 }
@@ -222,6 +204,42 @@ impl Config {
             }
             if !ids.insert(store.id.as_str()) {
                 bail!("duplicate store id {}", store.id);
+            }
+            validate_token_env(
+                &format!("store {} api_token_env", store.id),
+                &store.api_token_env,
+            )?;
+            if let Some(admin_token_env) = &store.admin_token_env {
+                validate_token_env(
+                    &format!("store {} admin_token_env", store.id),
+                    admin_token_env,
+                )?;
+                if admin_token_env == &store.api_token_env {
+                    bail!(
+                        "store {} admin_token_env must be separate from api_token_env",
+                        store.id
+                    );
+                }
+            }
+            if let Some(refund_token_env) = &store.refund_token_env {
+                validate_token_env(
+                    &format!("store {} refund_token_env", store.id),
+                    refund_token_env,
+                )?;
+                if refund_token_env == &store.api_token_env {
+                    bail!(
+                        "store {} refund_token_env must be separate from api_token_env",
+                        store.id
+                    );
+                }
+                if let Some(admin_token_env) = &store.admin_token_env
+                    && refund_token_env == admin_token_env
+                {
+                    bail!(
+                        "store {} refund_token_env must be separate from admin_token_env",
+                        store.id
+                    );
+                }
             }
             if store.webhook_url.is_some() && store.webhook_secret_env.is_none() {
                 bail!("store {} webhook_url requires webhook_secret_env", store.id);
@@ -428,8 +446,21 @@ impl LightningSweepConfig {
 
 impl StoreConfig {
     pub fn api_token(&self) -> anyhow::Result<String> {
-        std::env::var(&self.api_token_env)
-            .with_context(|| format!("missing env var {}", self.api_token_env))
+        token_from_env(&self.api_token_env)
+    }
+
+    pub fn admin_token(&self) -> anyhow::Result<String> {
+        match &self.admin_token_env {
+            Some(env) => token_from_env(env),
+            None => self.api_token(),
+        }
+    }
+
+    pub fn refund_token(&self) -> anyhow::Result<String> {
+        match (&self.refund_token_env, &self.admin_token_env) {
+            (Some(env), _) | (None, Some(env)) => token_from_env(env),
+            (None, None) => self.api_token(),
+        }
     }
 
     pub fn expiry_minutes(&self) -> u32 {
@@ -451,6 +482,10 @@ impl StoreConfig {
     pub fn payment_link(&self, id: &str) -> Option<&PaymentLinkConfig> {
         self.payment_links.iter().find(|link| link.id == id)
     }
+}
+
+fn token_from_env(env: &str) -> anyhow::Result<String> {
+    std::env::var(env).with_context(|| format!("missing env var {}", env))
 }
 
 impl OnchainConfig {
@@ -555,24 +590,12 @@ fn validate_hot_wallet_refunds(store_id: &str, hot_wallet: &HotWalletConfig) -> 
             hot_wallet.id
         );
     }
-    if hot_wallet.allowed_refund_destination_types.is_empty() {
-        bail!(
-            "store {store_id} hot_wallet {} allowed_refund_destination_types cannot be empty",
-            hot_wallet.id
-        );
-    }
-    for destination_type in &hot_wallet.allowed_refund_destination_types {
-        if !hot_wallet
-            .backend
-            .supports_refund_destination_type(*destination_type)
-        {
-            bail!(
-                "store {store_id} hot_wallet {} backend {} cannot execute {} refunds",
-                hot_wallet.id,
-                hot_wallet.backend.as_str(),
-                destination_type.as_str()
-            );
-        }
+    Ok(())
+}
+
+fn validate_token_env(scope: &str, env: &str) -> anyhow::Result<()> {
+    if env.trim() != env || env.is_empty() {
+        bail!("{scope} cannot be empty or contain surrounding whitespace");
     }
     Ok(())
 }
@@ -660,7 +683,6 @@ fn validate_script_integrity(integrity: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{Config, HotWalletBackend, HotWalletConfig, validate_hot_wallet_refunds};
-    use crate::invoice::RefundDestinationType;
 
     #[test]
     fn validates_public_payment_links() {
@@ -814,6 +836,56 @@ mod tests {
     }
 
     #[test]
+    fn validates_scoped_store_token_envs() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+            admin_token_env = "QPAYD_MAIN_ADMIN_TOKEN"
+            refund_token_env = "QPAYD_MAIN_REFUND_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+            "#,
+        )
+        .unwrap();
+
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_shared_scoped_store_token_envs() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+            refund_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+            "#,
+        )
+        .unwrap();
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("refund_token_env must be separate"));
+    }
+
+    #[test]
     fn rejects_shared_lightning_invoice_and_sweep_secret_env() {
         let config: Config = toml::from_str(
             r#"
@@ -926,7 +998,6 @@ mod tests {
             max_refund_sats = 100000
             daily_refund_limit_sats = 500000
             manual_approval_threshold_sats = 250000
-            allowed_refund_destination_types = ["lightning_invoice", "lnurl"]
             "#,
         )
         .unwrap();
@@ -960,7 +1031,6 @@ mod tests {
             full_api_password_env = "BARKD_FULL_AUTH_TOKEN"
             max_refund_sats = 100000
             daily_refund_limit_sats = 500000
-            allowed_refund_destination_types = ["lightning_invoice", "lnurl"]
 
             [[stores.hot_wallets]]
             id = "bitcoin-refunds"
@@ -971,7 +1041,6 @@ mod tests {
             full_api_password_env = "BITCOIND_REFUND_PASSWORD"
             max_refund_sats = 100000
             daily_refund_limit_sats = 500000
-            allowed_refund_destination_types = ["bitcoin_address", "bitcoin_uri"]
             "#,
         )
         .unwrap();
@@ -1005,7 +1074,6 @@ mod tests {
             full_api_password_env = "BARKD_FULL_AUTH_TOKEN"
             max_refund_sats = 100000
             daily_refund_limit_sats = 50000
-            allowed_refund_destination_types = ["lightning_invoice"]
             "#,
         )
         .unwrap();
@@ -1059,17 +1127,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_hot_wallet_allowed_refund_destination_types() {
-        let mut hot_wallet = valid_hot_wallet_refund_config();
-        hot_wallet.allowed_refund_destination_types.clear();
-
-        let error = validate_hot_wallet_refunds("main", &hot_wallet)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("allowed_refund_destination_types"));
-    }
-
-    #[test]
     fn rejects_shared_lightning_invoice_and_hot_wallet_secret_env() {
         let config: Config = toml::from_str(
             r#"
@@ -1095,7 +1152,6 @@ mod tests {
             full_api_password_env = "BARKD_AUTH_TOKEN"
             max_refund_sats = 100000
             daily_refund_limit_sats = 500000
-            allowed_refund_destination_types = ["lightning_invoice"]
             "#,
         )
         .unwrap();
@@ -1130,7 +1186,6 @@ mod tests {
             full_api_password_env = "BARKD_FULL_AUTH_TOKEN"
             max_refund_sats = 100000
             daily_refund_limit_sats = 500000
-            allowed_refund_destination_types = ["lightning_invoice"]
 
             [[stores.hot_wallets]]
             id = "refunds"
@@ -1141,7 +1196,6 @@ mod tests {
             full_api_password_env = "BITCOIND_REFUND_PASSWORD"
             max_refund_sats = 100000
             daily_refund_limit_sats = 500000
-            allowed_refund_destination_types = ["bitcoin_address"]
             "#,
         )
         .unwrap();
@@ -1176,7 +1230,6 @@ mod tests {
             full_api_password_env = "BARKD_FULL_AUTH_TOKEN"
             max_refund_sats = 100000
             daily_refund_limit_sats = 500000
-            allowed_refund_destination_types = ["lightning_invoice"]
 
             [[stores.hot_wallets]]
             id = "refunds"
@@ -1187,24 +1240,12 @@ mod tests {
             full_api_password_env = "BITCOIND_REFUND_PASSWORD"
             max_refund_sats = 100000
             daily_refund_limit_sats = 500000
-            allowed_refund_destination_types = ["bitcoin_address"]
             "#,
         )
         .unwrap();
 
         let error = config.validate().unwrap_err().to_string();
         assert!(error.contains("duplicate hot_wallet id"));
-    }
-
-    #[test]
-    fn rejects_hot_wallet_destination_types_not_supported_by_backend() {
-        let mut hot_wallet = valid_hot_wallet_refund_config();
-        hot_wallet.backend = HotWalletBackend::Bitcoind;
-
-        let error = validate_hot_wallet_refunds("main", &hot_wallet)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("cannot execute lightning_invoice refunds"));
     }
 
     fn valid_hot_wallet_refund_config() -> HotWalletConfig {
@@ -1219,10 +1260,6 @@ mod tests {
             max_refund_sats: 100_000,
             daily_refund_limit_sats: 500_000,
             manual_approval_threshold_sats: Some(250_000),
-            allowed_refund_destination_types: vec![
-                RefundDestinationType::LightningInvoice,
-                RefundDestinationType::Lnurl,
-            ],
         }
     }
 }

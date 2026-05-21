@@ -35,7 +35,11 @@ different browser origin than the API:
 [[stores]]
 id = "main"
 admin_allowed_origins = ["https://admin.example.com"]
+admin_token_env = "QPAYD_MAIN_ADMIN_TOKEN"
 ```
+
+If `admin_token_env` is configured, admin API requests must use that token. If
+it is omitted, admin API requests use the store `api_token_env`.
 
 qpayd can serve a minimal `/admin` bootstrap page that loads a pinned admin
 asset. The daemon does not bundle the admin UI. Use the generated release doc

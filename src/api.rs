@@ -208,7 +208,7 @@ async fn create_invoice(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize(store_cfg, &headers)?;
+    authorize_api(store_cfg, &headers)?;
     let idempotency_key = idempotency_key_from_headers(&headers)?;
     if let Some(key) = &idempotency_key
         && let Some(invoice) = state
@@ -506,7 +506,7 @@ async fn list_events(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize(store_cfg, &headers)?;
+    authorize_admin(store_cfg, &headers)?;
 
     Ok(Json(
         state
@@ -526,7 +526,7 @@ async fn list_invoices(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize(store_cfg, &headers)?;
+    authorize_admin(store_cfg, &headers)?;
     let status = query
         .status
         .as_deref()
@@ -590,7 +590,7 @@ async fn create_refund_for_invoice(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize(store_cfg, &headers)?;
+    authorize_refund(store_cfg, &headers)?;
     let invoice = state
         .store
         .invoice(&store_id, invoice_id)
@@ -673,7 +673,7 @@ async fn get_invoice_refund_summary(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize(store_cfg, &headers)?;
+    authorize_admin(store_cfg, &headers)?;
     let invoice = state
         .store
         .invoice(&store_id, invoice_id)
@@ -699,7 +699,7 @@ async fn list_invoice_refunds(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize(store_cfg, &headers)?;
+    authorize_admin(store_cfg, &headers)?;
     if state.store.invoice(&store_id, invoice_id).await?.is_none() {
         return Err(ApiError::not_found("invoice not found"));
     }
@@ -721,7 +721,7 @@ async fn list_refunds(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize(store_cfg, &headers)?;
+    authorize_admin(store_cfg, &headers)?;
     Ok(Json(
         state
             .store
@@ -739,7 +739,7 @@ async fn get_refund(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize(store_cfg, &headers)?;
+    authorize_admin(store_cfg, &headers)?;
     let refund = state
         .store
         .refund(&store_id, refund_id)
@@ -758,7 +758,7 @@ async fn finalize_refund(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize(store_cfg, &headers)?;
+    authorize_refund(store_cfg, &headers)?;
     let mut refund = state
         .store
         .refund(&store_id, refund_id)
@@ -794,7 +794,7 @@ async fn fail_refund(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize(store_cfg, &headers)?;
+    authorize_refund(store_cfg, &headers)?;
     let mut refund = state
         .store
         .refund(&store_id, refund_id)
@@ -829,7 +829,7 @@ async fn cancel_refund(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize(store_cfg, &headers)?;
+    authorize_refund(store_cfg, &headers)?;
     let mut refund = state
         .store
         .refund(&store_id, refund_id)
@@ -860,7 +860,7 @@ async fn get_lightning_balance(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize(store_cfg, &headers)?;
+    authorize_admin(store_cfg, &headers)?;
     let lightning = store_cfg
         .lightning
         .as_ref()
@@ -888,7 +888,7 @@ async fn create_lightning_sweep(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize(store_cfg, &headers)?;
+    authorize_admin(store_cfg, &headers)?;
     let sweep_cfg = store_cfg
         .lightning_sweep
         .as_ref()
@@ -965,7 +965,7 @@ async fn list_lightning_sweeps(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize(store_cfg, &headers)?;
+    authorize_admin(store_cfg, &headers)?;
     Ok(Json(
         state
             .store
@@ -983,7 +983,7 @@ async fn get_event(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize(store_cfg, &headers)?;
+    authorize_admin(store_cfg, &headers)?;
 
     let event = state
         .store
@@ -1002,7 +1002,7 @@ async fn replay_event(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize(store_cfg, &headers)?;
+    authorize_admin(store_cfg, &headers)?;
     let url = store_cfg
         .webhook_url
         .as_deref()
@@ -1028,7 +1028,7 @@ async fn get_invoice(
         .config
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
-    authorize(store_cfg, &headers)?;
+    authorize_admin(store_cfg, &headers)?;
 
     let invoice = state
         .store
@@ -1042,8 +1042,25 @@ async fn get_invoice(
     )))
 }
 
-fn authorize(store: &crate::config::StoreConfig, headers: &HeaderMap) -> Result<(), ApiError> {
-    let expected = store.api_token()?;
+fn authorize_api(store: &crate::config::StoreConfig, headers: &HeaderMap) -> Result<(), ApiError> {
+    authorize_with_token(&store.api_token()?, headers)
+}
+
+fn authorize_admin(
+    store: &crate::config::StoreConfig,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    authorize_with_token(&store.admin_token()?, headers)
+}
+
+fn authorize_refund(
+    store: &crate::config::StoreConfig,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    authorize_with_token(&store.refund_token()?, headers)
+}
+
+fn authorize_with_token(expected: &str, headers: &HeaderMap) -> Result<(), ApiError> {
     let Some(value) = headers.get(header::AUTHORIZATION) else {
         return Err(ApiError::unauthorized());
     };
@@ -1856,6 +1873,120 @@ mod tests {
                 .unwrap();
         assert_eq!(listed.as_array().unwrap().len(), 1);
         assert_eq!(listed[0]["id"], created["id"]);
+    }
+
+    #[tokio::test]
+    async fn admin_token_env_scopes_admin_routes() {
+        // SAFETY: this test uses fixed values and does not depend on concurrent
+        // mutation of the same environment variables.
+        unsafe {
+            std::env::set_var("QPAYD_MAIN_API_TOKEN", "test-token");
+            std::env::set_var("QPAYD_MAIN_ADMIN_TOKEN", "admin-token");
+        }
+        let mut config = test_config();
+        config.stores[0].admin_token_env = Some("QPAYD_MAIN_ADMIN_TOKEN".to_string());
+        let app = test_app_with_config(config).await;
+
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/stores/main/invoices")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        let allowed = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/stores/main/invoices")
+                    .header(header::AUTHORIZATION, "Bearer admin-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn refund_token_env_scopes_refund_mutations() {
+        // SAFETY: this test uses fixed values and does not depend on concurrent
+        // mutation of the same environment variables.
+        unsafe {
+            std::env::set_var("QPAYD_MAIN_API_TOKEN", "test-token");
+            std::env::set_var("QPAYD_MAIN_ADMIN_TOKEN", "admin-token");
+            std::env::set_var("QPAYD_MAIN_REFUND_TOKEN", "refund-token");
+        }
+        let mut config = test_config();
+        config.stores[0].admin_token_env = Some("QPAYD_MAIN_ADMIN_TOKEN".to_string());
+        config.stores[0].refund_token_env = Some("QPAYD_MAIN_REFUND_TOKEN".to_string());
+        let (app, store) = test_app_and_store_with_config(config).await;
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/stores/main/invoices")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"amount":"10.00","currency":"USD"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let created: serde_json::Value =
+            serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let invoice_id = uuid::Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+        store
+            .update_invoice_payment_amounts(
+                "main",
+                invoice_id,
+                PaymentAmounts {
+                    paid_sats: 12_000,
+                    confirmed_sats: 12_000,
+                    unconfirmed_sats: 0,
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/stores/main/invoices/{invoice_id}/refunds"))
+                    .header(header::AUTHORIZATION, "Bearer admin-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"amount_sats":2000}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        let allowed = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/stores/main/invoices/{invoice_id}/refunds"))
+                    .header(header::AUTHORIZATION, "Bearer refund-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"amount_sats":2000}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
     }
 
     #[tokio::test]

@@ -20,6 +20,9 @@ stale_after_seconds = 60
 id = "main"
 name = "Main Store"
 api_token_env = "QPAYD_MAIN_API_TOKEN"
+# Optional scoped tokens. If omitted, qpayd falls back to api_token_env.
+# admin_token_env = "QPAYD_MAIN_ADMIN_TOKEN"
+# refund_token_env = "QPAYD_MAIN_REFUND_TOKEN"
 invoice_expiry_minutes = 15
 min_confirmations = 1
 # public_allowed_origins = ["https://example.com"]
@@ -80,7 +83,6 @@ interval_seconds = 3600
 # daily_refund_limit_sats = 500000
 # manual_approval_threshold_sats = 250000
 # refund_poll_seconds = 30
-# allowed_refund_destination_types = ["lightning_invoice", "lnurl"]
 #
 # [[stores.hot_wallets]]
 # id = "bitcoin-refunds"
@@ -93,4 +95,3 @@ interval_seconds = 3600
 # daily_refund_limit_sats = 500000
 # manual_approval_threshold_sats = 250000
 # refund_poll_seconds = 30
-# allowed_refund_destination_types = ["bitcoin_address", "bitcoin_uri"]

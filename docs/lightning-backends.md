@@ -60,5 +60,4 @@ url = "http://127.0.0.1:3000"
 full_api_password_env = "BARKD_FULL_AUTH_TOKEN"
 max_refund_sats = 100000
 daily_refund_limit_sats = 500000
-allowed_refund_destination_types = ["lightning_invoice", "lnurl"]
 ```
