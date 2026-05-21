@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::invoice::{Invoice, InvoiceStatus};
+use crate::invoice::{Invoice, InvoiceStatus, Refund};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
@@ -38,6 +38,14 @@ pub fn invoice_status_event(
     invoice_event(&data, &format!("invoice.{}", status.as_str()), created_at)
 }
 
+pub fn refund_created_event(refund: &Refund, created_at: DateTime<Utc>) -> EventEnvelope {
+    refund_event(refund, "refund.created", created_at)
+}
+
+pub fn refund_finalized_event(refund: &Refund, created_at: DateTime<Utc>) -> EventEnvelope {
+    refund_event(refund, "refund.finalized", created_at)
+}
+
 fn invoice_event(invoice: &Invoice, event_type: &str, created_at: DateTime<Utc>) -> EventEnvelope {
     let mut data = serde_json::to_value(invoice).expect("invoice serializes");
     if let Some(object) = data.as_object_mut() {
@@ -62,4 +70,15 @@ fn invoice_event(invoice: &Invoice, event_type: &str, created_at: DateTime<Utc>)
 
 fn invoice_event_id(invoice_id: Uuid, event_type: &str) -> String {
     format!("evt_{}_{}", invoice_id, event_type.replace('.', "_"))
+}
+
+fn refund_event(refund: &Refund, event_type: &str, created_at: DateTime<Utc>) -> EventEnvelope {
+    EventEnvelope {
+        id: format!("evt_{}_{}", refund.id, event_type.replace('.', "_")),
+        event_type: event_type.to_string(),
+        store_id: refund.store_id.clone(),
+        invoice_id: Some(refund.invoice_id),
+        data: serde_json::to_value(refund).expect("refund serializes"),
+        created_at,
+    }
 }

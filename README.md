@@ -435,6 +435,52 @@ curl -sS https://pay.example.com/v1/stores/main/invoices/$INVOICE_ID \
   -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN"
 ```
 
+List invoices:
+
+```sh
+curl -sS "https://pay.example.com/v1/stores/main/invoices?status=settled&limit=50" \
+  -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN"
+```
+
+Create and finalize a refund record:
+
+```sh
+curl -sS https://pay.example.com/v1/stores/main/refunds \
+  -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "invoice_id": "b8e2b1fd-1ef3-4b1c-bf1c-5a2d60cccb53",
+    "amount_sats": 2000,
+    "destination": "bc1q...",
+    "reason": "overpayment"
+  }'
+```
+
+```sh
+curl -sS -X POST https://pay.example.com/v1/stores/main/refunds/$REFUND_ID/finalize \
+  -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "tx_id": "..." }'
+```
+
+Refund records emit `refund.created` and `refund.finalized` webhooks. qpayd
+does not spend on-chain funds; finalize a refund after the wallet or Lightning
+node that holds funds completes it.
+
+Read Lightning hot balance and sweep history:
+
+```sh
+curl -sS https://pay.example.com/v1/stores/main/lightning/balance \
+  -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN"
+```
+
+```sh
+curl -sS -X POST https://pay.example.com/v1/stores/main/lightning/sweeps \
+  -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN"
+curl -sS https://pay.example.com/v1/stores/main/lightning/sweeps \
+  -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN"
+```
+
 ## Payment Statuses
 
 Fulfill orders when an invoice reaches `settled`.
@@ -488,6 +534,8 @@ invoice.partially_paid
 invoice.settled
 invoice.expired
 invoice.paid_late
+refund.created
+refund.finalized
 ```
 
 Webhook requests are signed with:

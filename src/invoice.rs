@@ -52,6 +52,99 @@ pub struct InvoiceStatusUpdate {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Refund {
+    pub id: Uuid,
+    pub store_id: String,
+    pub invoice_id: Uuid,
+    pub status: RefundStatus,
+    pub amount_sats: u64,
+    pub destination: Option<String>,
+    pub reason: Option<String>,
+    pub tx_id: Option<String>,
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub finalized_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefundStatus {
+    Pending,
+    Succeeded,
+    Canceled,
+}
+
+impl RefundStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Succeeded => "succeeded",
+            Self::Canceled => "canceled",
+        }
+    }
+}
+
+impl TryFrom<&str> for RefundStatus {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "succeeded" => Ok(Self::Succeeded),
+            "canceled" => Ok(Self::Canceled),
+            other => anyhow::bail!("invalid refund status {other}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LightningSweepRecord {
+    pub id: Uuid,
+    pub store_id: String,
+    pub backend: String,
+    pub status: SweepStatus,
+    pub balance_sats: u64,
+    pub amount_sats: u64,
+    pub address: String,
+    pub tx_id: Option<String>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SweepStatus {
+    Succeeded,
+    Skipped,
+    Failed,
+}
+
+impl SweepStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Skipped => "skipped",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl TryFrom<&str> for SweepStatus {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "succeeded" => Ok(Self::Succeeded),
+            "skipped" => Ok(Self::Skipped),
+            "failed" => Ok(Self::Failed),
+            other => anyhow::bail!("invalid sweep status {other}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InvoiceStatus {

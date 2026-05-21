@@ -36,6 +36,13 @@ pub struct SweepResult {
     pub tx_id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct HotBalance {
+    pub backend: String,
+    pub balance_sats: u64,
+    pub spendable_sats: u64,
+}
+
 pub async fn create_invoice(
     config: &LightningConfig,
     amount_sats: u64,
@@ -56,6 +63,30 @@ pub async fn sweep_to_address(
     match config.backend {
         LightningBackend::Phoenixd => sweep_phoenixd_to_address(config, address).await,
         LightningBackend::Barkd => sweep_barkd_to_address(config, address).await,
+    }
+}
+
+pub async fn hot_balance(config: &LightningConfig) -> anyhow::Result<HotBalance> {
+    let client = reqwest::Client::new();
+    match config.backend {
+        LightningBackend::Phoenixd => {
+            let password = lightning_api_secret(config)?;
+            let balance = get_phoenixd_balance(config.url.as_str(), &client, &password).await?;
+            Ok(HotBalance {
+                backend: "phoenixd".to_string(),
+                balance_sats: balance.balance_sats,
+                spendable_sats: balance.balance_sats,
+            })
+        }
+        LightningBackend::Barkd => {
+            let token = lightning_api_secret(config)?;
+            let balance = get_barkd_balance(config.url.as_str(), &client, &token).await?;
+            Ok(HotBalance {
+                backend: "barkd".to_string(),
+                balance_sats: balance.spendable_sats,
+                spendable_sats: balance.spendable_sats,
+            })
+        }
     }
 }
 
@@ -265,7 +296,7 @@ async fn sweep_phoenixd_to_address(
     let password = std::env::var(&config.full_api_password_env)
         .with_context(|| format!("missing env var {}", config.full_api_password_env))?;
     let client = reqwest::Client::new();
-    let balance = get_phoenixd_balance(config, &client, &password).await?;
+    let balance = get_phoenixd_balance(config.url.as_str(), &client, &password).await?;
     let decision = sweep_decision(
         balance.balance_sats,
         config.min_balance_sats,
@@ -315,7 +346,7 @@ async fn sweep_barkd_to_address(
     let token = std::env::var(&config.full_api_password_env)
         .with_context(|| format!("missing env var {}", config.full_api_password_env))?;
     let client = reqwest::Client::new();
-    let balance = get_barkd_balance(config, &client, &token).await?;
+    let balance = get_barkd_balance(config.url.as_str(), &client, &token).await?;
     let decision = sweep_decision(
         balance.spendable_sats,
         config.min_balance_sats,
@@ -353,14 +384,14 @@ async fn sweep_barkd_to_address(
 }
 
 async fn get_barkd_balance(
-    config: &LightningSweepConfig,
+    url: &str,
     client: &reqwest::Client,
     token: &str,
 ) -> anyhow::Result<BarkdBalanceResponse> {
     client
         .get(format!(
             "{}/api/v1/wallet/balance",
-            config.url.trim_end_matches('/')
+            url.trim_end_matches('/')
         ))
         .bearer_auth(token)
         .send()
@@ -374,11 +405,11 @@ async fn get_barkd_balance(
 }
 
 async fn get_phoenixd_balance(
-    config: &LightningSweepConfig,
+    url: &str,
     client: &reqwest::Client,
     password: &str,
 ) -> anyhow::Result<PhoenixdBalanceResponse> {
-    let url = format!("{}/getbalance", config.url.trim_end_matches('/'));
+    let url = format!("{}/getbalance", url.trim_end_matches('/'));
     let mut last_error = None;
 
     for attempt in 1..=PHOENIXD_STARTUP_RETRY_ATTEMPTS {

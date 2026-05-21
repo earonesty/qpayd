@@ -109,6 +109,15 @@ pub enum LightningBackend {
     Barkd,
 }
 
+impl LightningBackend {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Phoenixd => "phoenixd",
+            Self::Barkd => "barkd",
+        }
+    }
+}
+
 impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let body = fs::read_to_string(path)

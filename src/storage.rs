@@ -12,8 +12,17 @@ use uuid::Uuid;
 
 use crate::{
     events::{EventEnvelope, QueuedWebhookDelivery},
-    invoice::{Invoice, InvoiceStatus, InvoiceStatusUpdate, PaymentAmounts},
+    invoice::{
+        Invoice, InvoiceStatus, InvoiceStatusUpdate, LightningSweepRecord, PaymentAmounts, Refund,
+        RefundStatus, SweepStatus,
+    },
 };
+
+#[derive(Debug, Clone, Default)]
+pub struct InvoiceListFilter {
+    pub status: Option<InvoiceStatus>,
+    pub limit: u32,
+}
 
 #[async_trait]
 pub trait Store: Send + Sync {
@@ -26,6 +35,11 @@ pub trait Store: Send + Sync {
         webhook_url: Option<&str>,
     ) -> anyhow::Result<()>;
     async fn invoice(&self, store_id: &str, id: Uuid) -> anyhow::Result<Option<Invoice>>;
+    async fn invoices(
+        &self,
+        store_id: &str,
+        filter: InvoiceListFilter,
+    ) -> anyhow::Result<Vec<Invoice>>;
     async fn invoice_by_idempotency_key(
         &self,
         store_id: &str,
@@ -80,6 +94,26 @@ pub trait Store: Send + Sync {
         error: &str,
         updated_at: DateTime<Utc>,
     ) -> anyhow::Result<()>;
+    async fn insert_refund(
+        &self,
+        refund: &Refund,
+        event: &EventEnvelope,
+        webhook_url: Option<&str>,
+    ) -> anyhow::Result<()>;
+    async fn refund(&self, store_id: &str, id: Uuid) -> anyhow::Result<Option<Refund>>;
+    async fn refunds(&self, store_id: &str, limit: u32) -> anyhow::Result<Vec<Refund>>;
+    async fn update_refund_status(
+        &self,
+        refund: &Refund,
+        event: &EventEnvelope,
+        webhook_url: Option<&str>,
+    ) -> anyhow::Result<()>;
+    async fn insert_lightning_sweep(&self, sweep: &LightningSweepRecord) -> anyhow::Result<()>;
+    async fn lightning_sweeps(
+        &self,
+        store_id: &str,
+        limit: u32,
+    ) -> anyhow::Result<Vec<LightningSweepRecord>>;
 }
 
 #[derive(Debug)]
@@ -240,6 +274,54 @@ impl Store for SqliteStore {
         };
 
         Ok(Some(invoice_from_row(row)?))
+    }
+
+    async fn invoices(
+        &self,
+        store_id: &str,
+        filter: InvoiceListFilter,
+    ) -> anyhow::Result<Vec<Invoice>> {
+        let limit = i64::from(filter.limit.clamp(1, 200));
+        let rows = if let Some(status) = filter.status {
+            sqlx::query(
+                r#"
+                SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                       paid_sats, confirmed_sats, unconfirmed_sats,
+                       onchain_address, onchain_address_index, onchain_script_pubkey,
+                       rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                       expires_at, created_at, updated_at
+                FROM invoices
+                WHERE store_id = ? AND status = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                "#,
+            )
+            .bind(store_id)
+            .bind(status.as_str())
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                       paid_sats, confirmed_sats, unconfirmed_sats,
+                       onchain_address, onchain_address_index, onchain_script_pubkey,
+                       rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                       expires_at, created_at, updated_at
+                FROM invoices
+                WHERE store_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                "#,
+            )
+            .bind(store_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        rows.into_iter().map(invoice_from_row).collect()
     }
 
     async fn invoice_by_idempotency_key(
@@ -536,6 +618,161 @@ impl Store for SqliteStore {
         .await?;
         Ok(())
     }
+
+    async fn insert_refund(
+        &self,
+        refund: &Refund,
+        event: &EventEnvelope,
+        webhook_url: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            INSERT INTO refunds (
+                id, store_id, invoice_id, status, amount_sats, destination,
+                reason, tx_id, metadata, created_at, updated_at, finalized_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(refund.id.to_string())
+        .bind(&refund.store_id)
+        .bind(refund.invoice_id.to_string())
+        .bind(refund.status.as_str())
+        .bind(refund.amount_sats as i64)
+        .bind(&refund.destination)
+        .bind(&refund.reason)
+        .bind(&refund.tx_id)
+        .bind(refund.metadata.to_string())
+        .bind(refund.created_at.to_rfc3339())
+        .bind(refund.updated_at.to_rfc3339())
+        .bind(refund.finalized_at.map(|time| time.to_rfc3339()))
+        .execute(&mut *tx)
+        .await?;
+        insert_event_query(event).execute(&mut *tx).await?;
+        if let Some(url) = webhook_url {
+            enqueue_webhook_query(&event.id, &event.store_id, url, event.created_at)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn refund(&self, store_id: &str, id: Uuid) -> anyhow::Result<Option<Refund>> {
+        let Some(row) = sqlx::query(
+            r#"
+            SELECT id, store_id, invoice_id, status, amount_sats, destination,
+                   reason, tx_id, metadata, created_at, updated_at, finalized_at
+            FROM refunds
+            WHERE store_id = ? AND id = ?
+            "#,
+        )
+        .bind(store_id)
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(refund_from_row(row)?))
+    }
+
+    async fn refunds(&self, store_id: &str, limit: u32) -> anyhow::Result<Vec<Refund>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, store_id, invoice_id, status, amount_sats, destination,
+                   reason, tx_id, metadata, created_at, updated_at, finalized_at
+            FROM refunds
+            WHERE store_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(store_id)
+        .bind(i64::from(limit.clamp(1, 200)))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(refund_from_row).collect()
+    }
+
+    async fn update_refund_status(
+        &self,
+        refund: &Refund,
+        event: &EventEnvelope,
+        webhook_url: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            UPDATE refunds
+            SET status = ?, tx_id = ?, updated_at = ?, finalized_at = ?
+            WHERE store_id = ? AND id = ?
+            "#,
+        )
+        .bind(refund.status.as_str())
+        .bind(&refund.tx_id)
+        .bind(refund.updated_at.to_rfc3339())
+        .bind(refund.finalized_at.map(|time| time.to_rfc3339()))
+        .bind(&refund.store_id)
+        .bind(refund.id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        insert_event_query(event).execute(&mut *tx).await?;
+        if let Some(url) = webhook_url {
+            enqueue_webhook_query(&event.id, &event.store_id, url, event.created_at)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn insert_lightning_sweep(&self, sweep: &LightningSweepRecord) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO lightning_sweeps (
+                id, store_id, backend, status, balance_sats, amount_sats,
+                address, tx_id, error, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(sweep.id.to_string())
+        .bind(&sweep.store_id)
+        .bind(&sweep.backend)
+        .bind(sweep.status.as_str())
+        .bind(sweep.balance_sats as i64)
+        .bind(sweep.amount_sats as i64)
+        .bind(&sweep.address)
+        .bind(&sweep.tx_id)
+        .bind(&sweep.error)
+        .bind(sweep.created_at.to_rfc3339())
+        .bind(sweep.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn lightning_sweeps(
+        &self,
+        store_id: &str,
+        limit: u32,
+    ) -> anyhow::Result<Vec<LightningSweepRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, store_id, backend, status, balance_sats, amount_sats,
+                   address, tx_id, error, created_at, updated_at
+            FROM lightning_sweeps
+            WHERE store_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(store_id)
+        .bind(i64::from(limit.clamp(1, 200)))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(lightning_sweep_from_row).collect()
+    }
 }
 
 #[async_trait]
@@ -658,6 +895,54 @@ impl Store for PostgresStore {
         };
 
         Ok(Some(invoice_from_pg_row(row)?))
+    }
+
+    async fn invoices(
+        &self,
+        store_id: &str,
+        filter: InvoiceListFilter,
+    ) -> anyhow::Result<Vec<Invoice>> {
+        let limit = i64::from(filter.limit.clamp(1, 200));
+        let rows = if let Some(status) = filter.status {
+            sqlx::query(
+                r#"
+                SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                       paid_sats, confirmed_sats, unconfirmed_sats,
+                       onchain_address, onchain_address_index, onchain_script_pubkey,
+                       rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                       expires_at, created_at, updated_at
+                FROM qpayd_invoices
+                WHERE store_id = $1 AND status = $2
+                ORDER BY created_at DESC
+                LIMIT $3
+                "#,
+            )
+            .bind(store_id)
+            .bind(status.as_str())
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                       paid_sats, confirmed_sats, unconfirmed_sats,
+                       onchain_address, onchain_address_index, onchain_script_pubkey,
+                       rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                       expires_at, created_at, updated_at
+                FROM qpayd_invoices
+                WHERE store_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+                "#,
+            )
+            .bind(store_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        rows.into_iter().map(invoice_from_pg_row).collect()
     }
 
     async fn invoice_by_idempotency_key(
@@ -954,6 +1239,161 @@ impl Store for PostgresStore {
         .await?;
         Ok(())
     }
+
+    async fn insert_refund(
+        &self,
+        refund: &Refund,
+        event: &EventEnvelope,
+        webhook_url: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            INSERT INTO qpayd_refunds (
+                id, store_id, invoice_id, status, amount_sats, destination,
+                reason, tx_id, metadata, created_at, updated_at, finalized_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            "#,
+        )
+        .bind(refund.id.to_string())
+        .bind(&refund.store_id)
+        .bind(refund.invoice_id.to_string())
+        .bind(refund.status.as_str())
+        .bind(refund.amount_sats as i64)
+        .bind(&refund.destination)
+        .bind(&refund.reason)
+        .bind(&refund.tx_id)
+        .bind(refund.metadata.to_string())
+        .bind(refund.created_at.to_rfc3339())
+        .bind(refund.updated_at.to_rfc3339())
+        .bind(refund.finalized_at.map(|time| time.to_rfc3339()))
+        .execute(&mut *tx)
+        .await?;
+        insert_pg_event_query(event).execute(&mut *tx).await?;
+        if let Some(url) = webhook_url {
+            enqueue_pg_webhook_query(&event.id, &event.store_id, url, event.created_at)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn refund(&self, store_id: &str, id: Uuid) -> anyhow::Result<Option<Refund>> {
+        let Some(row) = sqlx::query(
+            r#"
+            SELECT id, store_id, invoice_id, status, amount_sats, destination,
+                   reason, tx_id, metadata, created_at, updated_at, finalized_at
+            FROM qpayd_refunds
+            WHERE store_id = $1 AND id = $2
+            "#,
+        )
+        .bind(store_id)
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(refund_from_pg_row(row)?))
+    }
+
+    async fn refunds(&self, store_id: &str, limit: u32) -> anyhow::Result<Vec<Refund>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, store_id, invoice_id, status, amount_sats, destination,
+                   reason, tx_id, metadata, created_at, updated_at, finalized_at
+            FROM qpayd_refunds
+            WHERE store_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(store_id)
+        .bind(i64::from(limit.clamp(1, 200)))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(refund_from_pg_row).collect()
+    }
+
+    async fn update_refund_status(
+        &self,
+        refund: &Refund,
+        event: &EventEnvelope,
+        webhook_url: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            UPDATE qpayd_refunds
+            SET status = $1, tx_id = $2, updated_at = $3, finalized_at = $4
+            WHERE store_id = $5 AND id = $6
+            "#,
+        )
+        .bind(refund.status.as_str())
+        .bind(&refund.tx_id)
+        .bind(refund.updated_at.to_rfc3339())
+        .bind(refund.finalized_at.map(|time| time.to_rfc3339()))
+        .bind(&refund.store_id)
+        .bind(refund.id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        insert_pg_event_query(event).execute(&mut *tx).await?;
+        if let Some(url) = webhook_url {
+            enqueue_pg_webhook_query(&event.id, &event.store_id, url, event.created_at)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn insert_lightning_sweep(&self, sweep: &LightningSweepRecord) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO qpayd_lightning_sweeps (
+                id, store_id, backend, status, balance_sats, amount_sats,
+                address, tx_id, error, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            "#,
+        )
+        .bind(sweep.id.to_string())
+        .bind(&sweep.store_id)
+        .bind(&sweep.backend)
+        .bind(sweep.status.as_str())
+        .bind(sweep.balance_sats as i64)
+        .bind(sweep.amount_sats as i64)
+        .bind(&sweep.address)
+        .bind(&sweep.tx_id)
+        .bind(&sweep.error)
+        .bind(sweep.created_at.to_rfc3339())
+        .bind(sweep.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn lightning_sweeps(
+        &self,
+        store_id: &str,
+        limit: u32,
+    ) -> anyhow::Result<Vec<LightningSweepRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, store_id, backend, status, balance_sats, amount_sats,
+                   address, tx_id, error, created_at, updated_at
+            FROM qpayd_lightning_sweeps
+            WHERE store_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(store_id)
+        .bind(i64::from(limit.clamp(1, 200)))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(lightning_sweep_from_pg_row).collect()
+    }
 }
 
 struct Migration {
@@ -1060,6 +1500,51 @@ const SQLITE_MIGRATIONS: &[Migration] = &[
         "#,
             r#"
         ALTER TABLE invoices ADD COLUMN unconfirmed_sats INTEGER NOT NULL DEFAULT 0
+            "#,
+        ],
+    },
+    Migration {
+        version: 4,
+        name: "merchant_admin_records",
+        statements: &[
+            r#"
+        CREATE TABLE IF NOT EXISTS refunds (
+            id TEXT PRIMARY KEY NOT NULL,
+            store_id TEXT NOT NULL,
+            invoice_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            amount_sats INTEGER NOT NULL,
+            destination TEXT,
+            reason TEXT,
+            tx_id TEXT,
+            metadata TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            finalized_at TEXT
+        )
+        "#,
+            r#"
+        CREATE INDEX IF NOT EXISTS refunds_store_created_idx
+        ON refunds (store_id, created_at)
+        "#,
+            r#"
+        CREATE TABLE IF NOT EXISTS lightning_sweeps (
+            id TEXT PRIMARY KEY NOT NULL,
+            store_id TEXT NOT NULL,
+            backend TEXT NOT NULL,
+            status TEXT NOT NULL,
+            balance_sats INTEGER NOT NULL,
+            amount_sats INTEGER NOT NULL,
+            address TEXT NOT NULL,
+            tx_id TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        "#,
+            r#"
+        CREATE INDEX IF NOT EXISTS lightning_sweeps_store_created_idx
+        ON lightning_sweeps (store_id, created_at)
         "#,
         ],
     },
@@ -1162,6 +1647,51 @@ const POSTGRES_MIGRATIONS: &[Migration] = &[
         "#,
             r#"
         ALTER TABLE qpayd_invoices ADD COLUMN unconfirmed_sats BIGINT NOT NULL DEFAULT 0
+            "#,
+        ],
+    },
+    Migration {
+        version: 4,
+        name: "merchant_admin_records",
+        statements: &[
+            r#"
+        CREATE TABLE IF NOT EXISTS qpayd_refunds (
+            id TEXT PRIMARY KEY NOT NULL,
+            store_id TEXT NOT NULL,
+            invoice_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            amount_sats BIGINT NOT NULL,
+            destination TEXT,
+            reason TEXT,
+            tx_id TEXT,
+            metadata TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            finalized_at TEXT
+        )
+        "#,
+            r#"
+        CREATE INDEX IF NOT EXISTS qpayd_refunds_store_created_idx
+        ON qpayd_refunds (store_id, created_at)
+        "#,
+            r#"
+        CREATE TABLE IF NOT EXISTS qpayd_lightning_sweeps (
+            id TEXT PRIMARY KEY NOT NULL,
+            store_id TEXT NOT NULL,
+            backend TEXT NOT NULL,
+            status TEXT NOT NULL,
+            balance_sats BIGINT NOT NULL,
+            amount_sats BIGINT NOT NULL,
+            address TEXT NOT NULL,
+            tx_id TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        "#,
+            r#"
+        CREATE INDEX IF NOT EXISTS qpayd_lightning_sweeps_store_created_idx
+        ON qpayd_lightning_sweeps (store_id, created_at)
         "#,
         ],
     },
@@ -1404,6 +1934,134 @@ fn invoice_from_pg_row(row: sqlx::postgres::PgRow) -> anyhow::Result<Invoice> {
     })
 }
 
+fn refund_from_row(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<Refund> {
+    refund_from_fields(
+        row.get("id"),
+        row.get("store_id"),
+        row.get("invoice_id"),
+        row.get("status"),
+        row.get::<i64, _>("amount_sats"),
+        row.get("destination"),
+        row.get("reason"),
+        row.get("tx_id"),
+        row.get("metadata"),
+        row.get("created_at"),
+        row.get("updated_at"),
+        row.get("finalized_at"),
+    )
+}
+
+fn refund_from_pg_row(row: sqlx::postgres::PgRow) -> anyhow::Result<Refund> {
+    refund_from_fields(
+        row.get("id"),
+        row.get("store_id"),
+        row.get("invoice_id"),
+        row.get("status"),
+        row.get::<i64, _>("amount_sats"),
+        row.get("destination"),
+        row.get("reason"),
+        row.get("tx_id"),
+        row.get("metadata"),
+        row.get("created_at"),
+        row.get("updated_at"),
+        row.get("finalized_at"),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refund_from_fields(
+    id: String,
+    store_id: String,
+    invoice_id: String,
+    status: String,
+    amount_sats: i64,
+    destination: Option<String>,
+    reason: Option<String>,
+    tx_id: Option<String>,
+    metadata: String,
+    created_at: String,
+    updated_at: String,
+    finalized_at: Option<String>,
+) -> anyhow::Result<Refund> {
+    Ok(Refund {
+        id: Uuid::parse_str(&id)?,
+        store_id,
+        invoice_id: Uuid::parse_str(&invoice_id)?,
+        status: RefundStatus::try_from(status.as_str())?,
+        amount_sats: amount_sats as u64,
+        destination,
+        reason,
+        tx_id,
+        metadata: serde_json::from_str(&metadata)?,
+        created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
+        updated_at: DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc),
+        finalized_at: finalized_at
+            .map(|value| DateTime::parse_from_rfc3339(&value).map(|time| time.with_timezone(&Utc)))
+            .transpose()?,
+    })
+}
+
+fn lightning_sweep_from_row(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<LightningSweepRecord> {
+    lightning_sweep_from_fields(
+        row.get("id"),
+        row.get("store_id"),
+        row.get("backend"),
+        row.get("status"),
+        row.get::<i64, _>("balance_sats"),
+        row.get::<i64, _>("amount_sats"),
+        row.get("address"),
+        row.get("tx_id"),
+        row.get("error"),
+        row.get("created_at"),
+        row.get("updated_at"),
+    )
+}
+
+fn lightning_sweep_from_pg_row(row: sqlx::postgres::PgRow) -> anyhow::Result<LightningSweepRecord> {
+    lightning_sweep_from_fields(
+        row.get("id"),
+        row.get("store_id"),
+        row.get("backend"),
+        row.get("status"),
+        row.get::<i64, _>("balance_sats"),
+        row.get::<i64, _>("amount_sats"),
+        row.get("address"),
+        row.get("tx_id"),
+        row.get("error"),
+        row.get("created_at"),
+        row.get("updated_at"),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lightning_sweep_from_fields(
+    id: String,
+    store_id: String,
+    backend: String,
+    status: String,
+    balance_sats: i64,
+    amount_sats: i64,
+    address: String,
+    tx_id: Option<String>,
+    error: Option<String>,
+    created_at: String,
+    updated_at: String,
+) -> anyhow::Result<LightningSweepRecord> {
+    Ok(LightningSweepRecord {
+        id: Uuid::parse_str(&id)?,
+        store_id,
+        backend,
+        status: SweepStatus::try_from(status.as_str())?,
+        balance_sats: balance_sats as u64,
+        amount_sats: amount_sats as u64,
+        address,
+        tx_id,
+        error,
+        created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
+        updated_at: DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc),
+    })
+}
+
 fn event_from_row(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<EventEnvelope> {
     event_from_row_ref(&row)
 }
@@ -1452,7 +2110,10 @@ mod tests {
     use super::{PostgresStore, SqliteStore, Store};
     use crate::{
         events::{invoice_created_event, invoice_status_event},
-        invoice::{Invoice, InvoiceStatus, InvoiceStatusUpdate, PaymentAmounts},
+        invoice::{
+            Invoice, InvoiceStatus, InvoiceStatusUpdate, LightningSweepRecord, PaymentAmounts,
+            Refund, RefundStatus, SweepStatus,
+        },
     };
 
     #[tokio::test]
@@ -1498,6 +2159,12 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refund_and_sweep_records_round_trip() {
+        let store = test_store().await;
+        refund_and_sweep_records_round_trip_for(store.as_ref()).await;
+    }
+
+    #[tokio::test]
     async fn sqlite_migrate_records_initial_schema_once() {
         let path = std::env::temp_dir().join(format!("qpayd-migration-test-{}.db", Uuid::new_v4()));
         let store = SqliteStore::connect(&format!("sqlite://{}", path.display()))
@@ -1511,13 +2178,15 @@ mod tests {
             .fetch_all(&store.pool)
             .await
             .unwrap();
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 4);
         assert_eq!(rows[0].get::<i64, _>("version"), 1);
         assert_eq!(rows[0].get::<String, _>("name"), "initial_schema");
         assert_eq!(rows[1].get::<i64, _>("version"), 2);
         assert_eq!(rows[1].get::<String, _>("name"), "invoice_idempotency_keys");
         assert_eq!(rows[2].get::<i64, _>("version"), 3);
         assert_eq!(rows[2].get::<String, _>("name"), "invoice_payment_amounts");
+        assert_eq!(rows[3].get::<i64, _>("version"), 4);
+        assert_eq!(rows[3].get::<String, _>("name"), "merchant_admin_records");
     }
 
     #[tokio::test]
@@ -1531,13 +2200,15 @@ mod tests {
                 .fetch_all(&store.pool)
                 .await
                 .unwrap();
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 4);
         assert_eq!(rows[0].get::<i64, _>("version"), 1);
         assert_eq!(rows[0].get::<String, _>("name"), "initial_schema");
         assert_eq!(rows[1].get::<i64, _>("version"), 2);
         assert_eq!(rows[1].get::<String, _>("name"), "invoice_idempotency_keys");
         assert_eq!(rows[2].get::<i64, _>("version"), 3);
         assert_eq!(rows[2].get::<String, _>("name"), "invoice_payment_amounts");
+        assert_eq!(rows[3].get::<i64, _>("version"), 4);
+        assert_eq!(rows[3].get::<String, _>("name"), "merchant_admin_records");
 
         clean_pg_store(&store).await;
         insert_invoice_persists_event_and_webhook_delivery_for(&store).await;
@@ -1559,6 +2230,9 @@ mod tests {
 
         clean_pg_store(&store).await;
         address_indexes_are_persisted_per_store_for(&store).await;
+
+        clean_pg_store(&store).await;
+        refund_and_sweep_records_round_trip_for(&store).await;
     }
 
     async fn insert_invoice_persists_event_and_webhook_delivery_for(store: &dyn Store) {
@@ -1761,6 +2435,73 @@ mod tests {
         assert_eq!(store.reserve_address_index("secondary").await.unwrap(), 1);
     }
 
+    async fn refund_and_sweep_records_round_trip_for(store: &dyn Store) {
+        let mut invoice = test_invoice(InvoiceStatus::Settled);
+        invoice.paid_sats = 12_000;
+        invoice.confirmed_sats = 12_000;
+        let invoice_event = invoice_created_event(&invoice, invoice.created_at);
+        store
+            .insert_invoice(&invoice, &invoice_event, None)
+            .await
+            .unwrap();
+
+        let now = Utc::now();
+        let mut refund = Refund {
+            id: Uuid::new_v4(),
+            store_id: invoice.store_id.clone(),
+            invoice_id: invoice.id,
+            status: RefundStatus::Pending,
+            amount_sats: 2_000,
+            destination: Some("bc1qrefund".to_string()),
+            reason: Some("overpayment".to_string()),
+            tx_id: None,
+            metadata: serde_json::json!({ "operator": "test" }),
+            created_at: now,
+            updated_at: now,
+            finalized_at: None,
+        };
+        let refund_event = crate::events::refund_created_event(&refund, now);
+        store
+            .insert_refund(&refund, &refund_event, Some("https://example.com/webhook"))
+            .await
+            .unwrap();
+        refund.status = RefundStatus::Succeeded;
+        refund.tx_id = Some("tx123".to_string());
+        refund.updated_at = Utc::now();
+        refund.finalized_at = Some(refund.updated_at);
+        let finalized = crate::events::refund_finalized_event(&refund, refund.updated_at);
+        store
+            .update_refund_status(&refund, &finalized, Some("https://example.com/webhook"))
+            .await
+            .unwrap();
+        let found = store
+            .refund(&refund.store_id, refund.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.status, RefundStatus::Succeeded);
+        assert_eq!(found.tx_id.as_deref(), Some("tx123"));
+        assert_eq!(store.refunds(&refund.store_id, 10).await.unwrap().len(), 1);
+
+        let sweep = LightningSweepRecord {
+            id: Uuid::new_v4(),
+            store_id: invoice.store_id.clone(),
+            backend: "barkd".to_string(),
+            status: SweepStatus::Succeeded,
+            balance_sats: 150_000,
+            amount_sats: 125_000,
+            address: "bc1qsweep".to_string(),
+            tx_id: Some("sweeptx".to_string()),
+            error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        store.insert_lightning_sweep(&sweep).await.unwrap();
+        let sweeps = store.lightning_sweeps(&sweep.store_id, 10).await.unwrap();
+        assert_eq!(sweeps.len(), 1);
+        assert_eq!(sweeps[0].amount_sats, 125_000);
+    }
+
     async fn test_store() -> Box<dyn Store> {
         let path = std::env::temp_dir().join(format!("qpayd-test-{}.db", Uuid::new_v4()));
         let store = SqliteStore::connect(&format!("sqlite://{}", path.display()))
@@ -1785,6 +2526,8 @@ mod tests {
             DROP TABLE IF EXISTS
                 qpayd_webhook_deliveries,
                 qpayd_events,
+                qpayd_lightning_sweeps,
+                qpayd_refunds,
                 qpayd_invoices,
                 qpayd_store_counters,
                 qpayd_schema_migrations
@@ -1801,6 +2544,14 @@ mod tests {
             .await
             .unwrap();
         sqlx::query("DELETE FROM qpayd_events")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM qpayd_lightning_sweeps")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM qpayd_refunds")
             .execute(&store.pool)
             .await
             .unwrap();
