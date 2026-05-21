@@ -27,19 +27,27 @@ asset_integrity = "{{ADMIN_ASSET_INTEGRITY}}"
 id = "main"
 admin_allowed_origins = ["https://pay.example.com"]
 admin_token_env = "QPAYD_MAIN_ADMIN_TOKEN"
+payout_token_env = "QPAYD_MAIN_PAYOUT_TOKEN"
 ```
 
-Change `store_id`, `admin_allowed_origins`, and `admin_token_env` for your
+Change `store_id`, `admin_allowed_origins`, and token env names for your
 deployment. The origin must be the browser origin that serves the admin page. If
 qpayd serves `/admin` from the same origin as the API, use that origin. If
 `admin_token_env` is omitted, admin API requests use the store `api_token_env`.
+If `payout_token_env` is configured, payout and refund actions use that token.
+Set `admin_token_can_payout = true` on a store when one admin token should also
+be able to run payout actions.
+
+Omit `store_id` when the hosted admin page should choose the store after token
+login. In that mode, qpayd does not publish store ids in the `/admin` HTML.
 
 ## Security model
 
 - qpayd serves only a bootstrap page at `/admin`.
 - The admin UI is loaded from the pinned `asset_source`.
 - `asset_integrity` makes the browser reject changed bytes.
-- The admin token is entered in the browser and sent directly to qpayd.
+- The token is entered in the browser and sent directly to qpayd.
+- Tokens are routed after login to the stores and scopes they can access.
 - qpayd still enforces `Authorization: Bearer ...` on admin API calls.
 - Remote admin assets must use `https`.
 - Do not use `@latest` in `asset_source`.

@@ -4,9 +4,8 @@ const TOKEN_STORAGE_PREFIX = "qpayd-admin-token";
 export class QPaydAdminClient {
   constructor(options) {
     if (!options?.baseUrl) throw new Error("QPaydAdminClient requires baseUrl");
-    if (!options?.storeId) throw new Error("QPaydAdminClient requires storeId");
     this.baseUrl = options.baseUrl.replace(/\/$/, "");
-    this.storeId = options.storeId;
+    this.storeId = options.storeId ?? "";
     this.token = options.token ?? "";
     this.fetch = options.fetch ?? globalThis.fetch?.bind(globalThis);
     if (!this.fetch) throw new Error("QPaydAdminClient requires fetch");
@@ -16,26 +15,38 @@ export class QPaydAdminClient {
     this.token = token;
   }
 
+  setStore(storeId) {
+    this.storeId = storeId;
+  }
+
+  async getSession() {
+    return this.#json("/v1/admin/session");
+  }
+
   async listInvoices(options = {}) {
+    const storeId = this.#requireStore();
     const params = new URLSearchParams();
     params.set("limit", String(options.limit ?? DEFAULT_LIMIT));
     if (options.status) params.set("status", options.status);
-    return this.#json(`/v1/stores/${encodeURIComponent(this.storeId)}/invoices?${params}`);
+    return this.#json(`/v1/stores/${encodeURIComponent(storeId)}/invoices?${params}`);
   }
 
   async getInvoice(invoiceId) {
-    return this.#json(`/v1/stores/${encodeURIComponent(this.storeId)}/invoices/${encodeURIComponent(invoiceId)}`);
+    const storeId = this.#requireStore();
+    return this.#json(`/v1/stores/${encodeURIComponent(storeId)}/invoices/${encodeURIComponent(invoiceId)}`);
   }
 
   async getRefundSummary(invoiceId) {
+    const storeId = this.#requireStore();
     return this.#json(
-      `/v1/stores/${encodeURIComponent(this.storeId)}/invoices/${encodeURIComponent(invoiceId)}/refund-summary`
+      `/v1/stores/${encodeURIComponent(storeId)}/invoices/${encodeURIComponent(invoiceId)}/refund-summary`
     );
   }
 
   async createInvoiceRefund(invoiceId, refund) {
+    const storeId = this.#requireStore();
     return this.#json(
-      `/v1/stores/${encodeURIComponent(this.storeId)}/invoices/${encodeURIComponent(invoiceId)}/refunds`,
+      `/v1/stores/${encodeURIComponent(storeId)}/invoices/${encodeURIComponent(invoiceId)}/refunds`,
       {
         method: "POST",
         body: JSON.stringify({
@@ -48,8 +59,16 @@ export class QPaydAdminClient {
     );
   }
 
+  async listRefunds(options = {}) {
+    const storeId = this.#requireStore();
+    const params = new URLSearchParams();
+    params.set("limit", String(options.limit ?? DEFAULT_LIMIT));
+    return this.#json(`/v1/stores/${encodeURIComponent(storeId)}/refunds?${params}`);
+  }
+
   async finalizeRefund(refundId, options = {}) {
-    return this.#json(`/v1/stores/${encodeURIComponent(this.storeId)}/refunds/${encodeURIComponent(refundId)}/finalize`, {
+    const storeId = this.#requireStore();
+    return this.#json(`/v1/stores/${encodeURIComponent(storeId)}/refunds/${encodeURIComponent(refundId)}/finalize`, {
       method: "POST",
       body: JSON.stringify({
         tx_id: options.txId || null,
@@ -59,20 +78,27 @@ export class QPaydAdminClient {
   }
 
   async failRefund(refundId, failureReason) {
-    return this.#json(`/v1/stores/${encodeURIComponent(this.storeId)}/refunds/${encodeURIComponent(refundId)}/fail`, {
+    const storeId = this.#requireStore();
+    return this.#json(`/v1/stores/${encodeURIComponent(storeId)}/refunds/${encodeURIComponent(refundId)}/fail`, {
       method: "POST",
       body: JSON.stringify({ failure_reason: failureReason })
     });
   }
 
   async cancelRefund(refundId) {
-    return this.#json(`/v1/stores/${encodeURIComponent(this.storeId)}/refunds/${encodeURIComponent(refundId)}/cancel`, {
+    const storeId = this.#requireStore();
+    return this.#json(`/v1/stores/${encodeURIComponent(storeId)}/refunds/${encodeURIComponent(refundId)}/cancel`, {
       method: "POST"
     });
   }
 
+  #requireStore() {
+    if (!this.storeId) throw new Error("Store selection required");
+    return this.storeId;
+  }
+
   async #json(path, init = {}) {
-    if (!this.token) throw new Error("Admin token required");
+    if (!this.token) throw new Error("Token required");
     const response = await this.fetch(`${this.baseUrl}${path}`, {
       ...init,
       headers: {
@@ -100,12 +126,17 @@ export function mountQPaydAdmin(target, options) {
   const root = typeof target === "string" ? document.querySelector(target) : target;
   if (!root) throw new Error("mountQPaydAdmin target not found");
   const client = options.client ?? new QPaydAdminClient(options);
-  const storageKey = options.storageKey ?? `${TOKEN_STORAGE_PREFIX}:${client.baseUrl}:${client.storeId}`;
+  const storageKey = options.storageKey ?? `${TOKEN_STORAGE_PREFIX}:${client.baseUrl}:${client.storeId || "session"}`;
   const state = {
     client,
     storageKey,
+    fixedStoreId: client.storeId,
+    stores: [],
+    selectedStore: null,
+    scopes: [],
     remember: false,
     invoices: [],
+    refunds: [],
     selectedInvoice: null,
     refundSummary: null,
     status: "",
@@ -118,10 +149,10 @@ export function mountQPaydAdmin(target, options) {
 
   installAdminStyles();
   render(root, state);
-  if (client.token) refreshInvoices(root, state);
+  if (client.token) startSession(root, state);
   return {
     client,
-    refresh: () => refreshInvoices(root, state),
+    refresh: () => refreshCurrentView(root, state),
     destroy: () => {
       root.innerHTML = "";
     }
@@ -135,7 +166,7 @@ function autoMountQPaydAdmin() {
   const target = script.dataset.target || "#qpayd-admin";
   mountQPaydAdmin(target, {
     baseUrl: script.dataset.baseUrl || window.location.origin,
-    storeId: script.dataset.storeId
+    storeId: script.dataset.storeId || ""
   });
 }
 
@@ -159,23 +190,31 @@ function bind(root, state) {
       if (state.remember) localStorage.setItem(state.storageKey, token);
       state.error = "";
       render(root, state);
-      refreshInvoices(root, state);
+      startSession(root, state);
     });
     return;
   }
 
-  root.querySelector("[data-qpayd-refresh]")?.addEventListener("click", () => refreshInvoices(root, state));
+  root.querySelector("[data-qpayd-store-select]")?.addEventListener("change", (event) => {
+    selectStore(root, state, event.target.value);
+  });
+  root.querySelector("[data-qpayd-refresh]")?.addEventListener("click", () => refreshCurrentView(root, state));
   root.querySelector("[data-qpayd-logout]")?.addEventListener("click", () => {
     localStorage.removeItem(state.storageKey);
     state.client.setToken("");
+    state.client.setStore(state.fixedStoreId || "");
+    state.stores = [];
+    state.selectedStore = null;
+    state.scopes = [];
     state.invoices = [];
+    state.refunds = [];
     state.selectedInvoice = null;
     state.refundSummary = null;
     render(root, state);
   });
   root.querySelector("[data-qpayd-status-filter]")?.addEventListener("change", (event) => {
     state.status = event.target.value;
-    refreshInvoices(root, state);
+    refreshCurrentView(root, state);
   });
   root.querySelectorAll("[data-qpayd-invoice]").forEach((button) => {
     button.addEventListener("click", () => loadInvoice(root, state, button.dataset.qpaydInvoice));
@@ -196,6 +235,57 @@ function bind(root, state) {
   });
 }
 
+async function startSession(root, state) {
+  state.error = "";
+  state.notice = "";
+  render(root, state);
+  try {
+    const session = await state.client.getSession();
+    state.stores = session.stores ?? [];
+    if (state.fixedStoreId) {
+      const store = state.stores.find((item) => item.id === state.fixedStoreId);
+      if (!store) throw new Error("Token is not authorized for this store");
+      await selectStore(root, state, state.fixedStoreId, false);
+      return;
+    }
+    const savedStore = localStorage.getItem(`${state.storageKey}:store`);
+    const store = state.stores.find((item) => item.id === savedStore) ?? state.stores[0];
+    if (!store) throw new Error("Token is not authorized for any store");
+    await selectStore(root, state, store.id, false);
+  } catch (error) {
+    state.client.setToken("");
+    state.error = error.message;
+    render(root, state);
+  }
+}
+
+async function selectStore(root, state, storeId, rerender = true) {
+  const store = state.stores.find((item) => item.id === storeId);
+  if (!store) {
+    state.error = "Store is not available for this token";
+    render(root, state);
+    return;
+  }
+  state.client.setStore(store.id);
+  state.selectedStore = store;
+  state.scopes = store.scopes ?? [];
+  state.invoices = [];
+  state.refunds = [];
+  state.selectedInvoice = null;
+  state.refundSummary = null;
+  if (!state.fixedStoreId) localStorage.setItem(`${state.storageKey}:store`, store.id);
+  if (rerender) render(root, state);
+  await refreshCurrentView(root, state);
+}
+
+async function refreshCurrentView(root, state) {
+  if (state.scopes.includes("admin")) {
+    await refreshInvoices(root, state);
+  } else if (state.scopes.includes("payout")) {
+    await refreshRefunds(root, state);
+  }
+}
+
 async function refreshInvoices(root, state) {
   state.error = "";
   state.notice = "";
@@ -206,6 +296,18 @@ async function refreshInvoices(root, state) {
       await loadInvoice(root, state, state.invoices[0].id, false);
       return;
     }
+  } catch (error) {
+    state.error = error.message;
+  }
+  render(root, state);
+}
+
+async function refreshRefunds(root, state) {
+  state.error = "";
+  state.notice = "";
+  render(root, state);
+  try {
+    state.refunds = await state.client.listRefunds({ limit: DEFAULT_LIMIT });
   } catch (error) {
     state.error = error.message;
   }
@@ -337,11 +439,11 @@ function loginHtml(state) {
     <section class="qpayd-login" aria-label="qpayd admin login">
       <div>
         <h1>qpayd admin</h1>
-        <p>${escapeHtml(state.client.storeId)} at ${escapeHtml(state.client.baseUrl)}</p>
+        <p>${state.client.storeId ? escapeHtml(state.client.storeId) : "Enter a token to continue"} at ${escapeHtml(state.client.baseUrl)}</p>
       </div>
       <form data-qpayd-admin-login>
         <label>
-          Admin token
+          Admin or payout token
           <input name="token" type="password" autocomplete="current-password" required autofocus>
         </label>
         <label class="qpayd-check">
@@ -362,31 +464,70 @@ function appHtml(state) {
         <header>
           <div>
             <strong>qpayd</strong>
-            <span>${escapeHtml(state.client.storeId)}</span>
+            <span>${escapeHtml(state.selectedStore?.name || state.client.storeId)}</span>
           </div>
           <button type="button" data-qpayd-logout>Log out</button>
         </header>
+        ${storeSelectHtml(state)}
         <div class="qpayd-toolbar">
-          <select data-qpayd-status-filter aria-label="Invoice status">
-            ${statusOptions(state.status)}
-          </select>
+          ${state.scopes.includes("admin") ? `<select data-qpayd-status-filter aria-label="Invoice status">${statusOptions(state.status)}</select>` : `<span class="qpayd-scope">Payout queue</span>`}
           <button type="button" data-qpayd-refresh>Refresh</button>
         </div>
         <div class="qpayd-list">
-          ${state.invoices.map((invoice) => invoiceRowHtml(invoice, state.selectedInvoice?.id)).join("")}
+          ${state.scopes.includes("admin")
+            ? state.invoices.map((invoice) => invoiceRowHtml(invoice, state.selectedInvoice?.id)).join("")
+            : state.refunds.map(refundQueueRowHtml).join("") || `<p class="qpayd-empty-list">No refunds.</p>`}
         </div>
       </aside>
       <main class="qpayd-main">
         ${messageHtml(state)}
-        ${state.selectedInvoice ? invoiceDetailHtml(state) : `<section class="qpayd-empty">Select an invoice</section>`}
+        ${state.scopes.includes("admin")
+          ? (state.selectedInvoice ? invoiceDetailHtml(state) : `<section class="qpayd-empty">Select an invoice</section>`)
+          : payoutQueueHtml(state)}
       </main>
     </div>
+  `;
+}
+
+function storeSelectHtml(state) {
+  if (state.fixedStoreId || state.stores.length <= 1) return "";
+  return `
+    <div class="qpayd-store-switcher">
+      <label>
+        Store
+        <select data-qpayd-store-select>
+          ${state.stores.map((store) => `
+            <option value="${escapeHtml(store.id)}" ${store.id === state.client.storeId ? "selected" : ""}>
+              ${escapeHtml(store.name || store.id)}
+            </option>
+          `).join("")}
+        </select>
+      </label>
+    </div>
+  `;
+}
+
+function payoutQueueHtml(state) {
+  return `
+    <section class="qpayd-detail">
+      <header>
+        <div>
+          <h2>Payout queue</h2>
+          <p>${escapeHtml(state.client.storeId)}</p>
+        </div>
+      </header>
+      <section class="qpayd-refunds">
+        <h3>Refunds</h3>
+        ${state.refunds.map(refundHtml).join("") || `<p>No refunds.</p>`}
+      </section>
+    </section>
   `;
 }
 
 function invoiceDetailHtml(state) {
   const invoice = state.selectedInvoice;
   const summary = state.refundSummary;
+  const canPayout = state.scopes.includes("payout");
   return `
     <section class="qpayd-detail">
       <header>
@@ -402,7 +543,7 @@ function invoiceDetailHtml(state) {
         <div><dt>Overpaid</dt><dd>${sats(invoice.overpaid_sats)}</dd></div>
         <div><dt>Refundable</dt><dd>${sats(summary?.refundable_sats ?? 0)}</dd></div>
       </dl>
-      <section class="qpayd-refund">
+      ${canPayout ? `<section class="qpayd-refund">
         <h3>Create refund</h3>
         <form data-qpayd-refund-form>
           <label>
@@ -422,10 +563,10 @@ function invoiceDetailHtml(state) {
           </label>
           <button type="submit" ${summary?.refundable_sats ? "" : "disabled"}>Queue refund</button>
         </form>
-      </section>
+      </section>` : ""}
       <section class="qpayd-refunds">
         <h3>Refunds</h3>
-        ${(summary?.refunds ?? []).map(refundHtml).join("") || `<p>No refunds yet.</p>`}
+        ${(summary?.refunds ?? []).map((refund) => refundHtml(refund, canPayout)).join("") || `<p>No refunds yet.</p>`}
       </section>
     </section>
   `;
@@ -441,8 +582,8 @@ function invoiceRowHtml(invoice, selectedId) {
   `;
 }
 
-function refundHtml(refund) {
-  const pending = refund.status === "pending";
+function refundHtml(refund, canPayout = true) {
+  const pending = canPayout && refund.status === "pending";
   return `
     <article class="qpayd-refund-row">
       <div>
@@ -458,6 +599,16 @@ function refundHtml(refund) {
         ${pending ? `<button type="button" data-qpayd-cancel="${escapeHtml(refund.id)}">Cancel</button>` : ""}
       </div>
     </article>
+  `;
+}
+
+function refundQueueRowHtml(refund) {
+  return `
+    <button type="button" disabled>
+      <span>${sats(refund.amount_sats)}</span>
+      <strong>${escapeHtml(refund.status)}</strong>
+      <em>${escapeHtml(refund.invoice_id || refund.id)}</em>
+    </button>
   `;
 }
 
@@ -534,10 +685,14 @@ function installAdminStyles() {
     .qpayd-sidebar strong { display: block; font-size: 20px; }
     .qpayd-sidebar span, .qpayd-detail p { color: #5d6b61; overflow-wrap: anywhere; }
     .qpayd-toolbar { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 12px; border-bottom: 1px solid #d8ddd2; }
+    .qpayd-store-switcher { padding: 12px; border-bottom: 1px solid #d8ddd2; }
+    .qpayd-scope { display: inline-flex; align-items: center; min-height: 40px; color: #5d6b61; font-weight: 800; }
     .qpayd-list { display: grid; max-height: calc(100vh - 122px); overflow: auto; }
     .qpayd-list button { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; min-height: 72px; padding: 12px; border: 0; border-bottom: 1px solid #ecf0e8; border-radius: 0; text-align: left; }
     .qpayd-list button[aria-current="true"] { background: #e8f2e9; }
+    .qpayd-list button:disabled { cursor: default; color: inherit; background: #fff; }
     .qpayd-list em { color: #5d6b61; font-style: normal; font-size: 13px; }
+    .qpayd-empty-list { margin: 0; padding: 14px; color: #5d6b61; }
     .qpayd-main { padding: 18px; min-width: 0; }
     .qpayd-detail { display: grid; gap: 16px; max-width: 980px; }
     .qpayd-detail header { border: 1px solid #d8ddd2; border-radius: 8px; background: #fff; }

@@ -475,6 +475,7 @@ mod tests {
             api_token_env: Some("QPAYD_API_TOKEN".to_string()),
             admin_token_env: None,
             payout_token_env: None,
+            admin_token_can_payout: None,
             public_allowed_origins: Vec::new(),
             admin_allowed_origins: Vec::new(),
             webhook_url: None,
