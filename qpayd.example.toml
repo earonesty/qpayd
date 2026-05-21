@@ -79,7 +79,8 @@ interval_seconds = 3600
 # target_balance_sats = 25000
 # interval_seconds = 3600
 
-# Optional per-store payout configs for refund execution.
+# Optional per-store payout configs for refund execution. Run `qpayd refunds`
+# on the wallet host for a split receive/payout deployment.
 #
 # [stores.lightning_payout.refunds]
 # enabled = true

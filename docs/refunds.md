@@ -35,6 +35,10 @@ curl -sS https://pay.example.com/v1/stores/main/invoices/$INVOICE_ID/refunds \
   }'
 ```
 
+When refund execution is enabled, qpayd claims pending refunds, sends them to
+the matching payout backend, and finalizes successful payments with the returned
+transaction id or payment proof.
+
 Finalize it after the refund payment is sent:
 
 ```sh
@@ -121,6 +125,11 @@ For an end-to-end check, create a small invoice, pay it, create a tiny refund,
 run the executor, then query the refund and confirm it is `"status":"succeeded"`
 or `"status":"failed"` with the expected payout fields.
 
+The normal `serve` command also starts the refund executor when at least one
+store has refund execution enabled. Operators that split public receive traffic
+from wallet operations should run the `refunds` command on the wallet host and
+leave refund execution disabled on the public server.
+
 ## Refund Execution Config
 
 qpayd has per-store payout config for refund execution. Lightning payouts share
@@ -157,6 +166,11 @@ daily_refund_limit_sats = 500000
 manual_approval_threshold_sats = 250000
 poll_seconds = 30
 ```
+
+`max_refund_sats` applies to one refund. `daily_refund_limit_sats` applies to
+successful refunds finalized by qpayd during the current UTC day.
+`manual_approval_threshold_sats` makes larger refunds wait for an admin approval
+before the payout token can execute or finalize them.
 
 Backend-specific wallet configuration is covered in
 [Lightning backends](./lightning-backends.md).
