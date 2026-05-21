@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::{
     events::{EventEnvelope, QueuedWebhookDelivery},
-    invoice::{Invoice, InvoiceStatus},
+    invoice::{Invoice, InvoiceStatus, InvoiceStatusUpdate, PaymentAmounts},
 };
 
 #[async_trait]
@@ -42,10 +42,16 @@ pub trait Store: Send + Sync {
         &self,
         store_id: &str,
         id: Uuid,
-        status: InvoiceStatus,
-        updated_at: DateTime<Utc>,
+        update: InvoiceStatusUpdate,
         event: &EventEnvelope,
         webhook_url: Option<&str>,
+    ) -> anyhow::Result<()>;
+    async fn update_invoice_payment_amounts(
+        &self,
+        store_id: &str,
+        id: Uuid,
+        payment: PaymentAmounts,
+        updated_at: DateTime<Utc>,
     ) -> anyhow::Result<()>;
     async fn events(&self, store_id: &str, limit: u32) -> anyhow::Result<Vec<EventEnvelope>>;
     async fn event(&self, store_id: &str, event_id: &str) -> anyhow::Result<Option<EventEnvelope>>;
@@ -171,10 +177,11 @@ impl Store for SqliteStore {
             r#"
             INSERT INTO invoices (
                 id, store_id, status, amount, currency, btc_amount_sats,
+                paid_sats, confirmed_sats, unconfirmed_sats,
                 onchain_address, onchain_address_index, onchain_script_pubkey,
                 lightning_bolt11, lightning_payment_hash, idempotency_key, rate_source, rate,
                 metadata, expires_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(invoice.id.to_string())
@@ -183,6 +190,9 @@ impl Store for SqliteStore {
         .bind(invoice.amount.to_string())
         .bind(&invoice.currency)
         .bind(invoice.btc_amount_sats as i64)
+        .bind(invoice.paid_sats as i64)
+        .bind(invoice.confirmed_sats as i64)
+        .bind(invoice.unconfirmed_sats as i64)
         .bind(&invoice.onchain_address)
         .bind(invoice.onchain_address_index.map(|index| index as i64))
         .bind(&invoice.onchain_script_pubkey)
@@ -213,6 +223,7 @@ impl Store for SqliteStore {
         let Some(row) = sqlx::query(
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                   paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
                    rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
                    expires_at, created_at, updated_at
@@ -239,6 +250,7 @@ impl Store for SqliteStore {
         let Some(row) = sqlx::query(
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                   paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
                    rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
                    expires_at, created_at, updated_at
@@ -261,6 +273,7 @@ impl Store for SqliteStore {
         let rows = sqlx::query(
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                   paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
                    rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
                    expires_at, created_at, updated_at
@@ -281,6 +294,7 @@ impl Store for SqliteStore {
         let rows = sqlx::query(
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                   paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
                    rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
                    expires_at, created_at, updated_at
@@ -305,6 +319,7 @@ impl Store for SqliteStore {
         let rows = sqlx::query(
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                   paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
                    rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
                    expires_at, created_at, updated_at
@@ -326,8 +341,7 @@ impl Store for SqliteStore {
         &self,
         store_id: &str,
         id: Uuid,
-        status: InvoiceStatus,
-        updated_at: DateTime<Utc>,
+        update: InvoiceStatusUpdate,
         event: &EventEnvelope,
         webhook_url: Option<&str>,
     ) -> anyhow::Result<()> {
@@ -335,12 +349,19 @@ impl Store for SqliteStore {
         sqlx::query(
             r#"
             UPDATE invoices
-            SET status = ?, updated_at = ?
+            SET status = ?,
+                paid_sats = ?,
+                confirmed_sats = ?,
+                unconfirmed_sats = ?,
+                updated_at = ?
             WHERE store_id = ? AND id = ?
             "#,
         )
-        .bind(status.as_str())
-        .bind(updated_at.to_rfc3339())
+        .bind(update.status.as_str())
+        .bind(update.payment.paid_sats as i64)
+        .bind(update.payment.confirmed_sats as i64)
+        .bind(update.payment.unconfirmed_sats as i64)
+        .bind(update.updated_at.to_rfc3339())
         .bind(store_id)
         .bind(id.to_string())
         .execute(&mut *tx)
@@ -358,6 +379,34 @@ impl Store for SqliteStore {
         }
         tx.commit().await?;
 
+        Ok(())
+    }
+
+    async fn update_invoice_payment_amounts(
+        &self,
+        store_id: &str,
+        id: Uuid,
+        payment: PaymentAmounts,
+        updated_at: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE invoices
+            SET paid_sats = ?,
+                confirmed_sats = ?,
+                unconfirmed_sats = ?,
+                updated_at = ?
+            WHERE store_id = ? AND id = ?
+            "#,
+        )
+        .bind(payment.paid_sats as i64)
+        .bind(payment.confirmed_sats as i64)
+        .bind(payment.unconfirmed_sats as i64)
+        .bind(updated_at.to_rfc3339())
+        .bind(store_id)
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -546,10 +595,11 @@ impl Store for PostgresStore {
             r#"
             INSERT INTO qpayd_invoices (
                 id, store_id, status, amount, currency, btc_amount_sats,
+                paid_sats, confirmed_sats, unconfirmed_sats,
                 onchain_address, onchain_address_index, onchain_script_pubkey,
                 lightning_bolt11, lightning_payment_hash, idempotency_key, rate_source, rate,
                 metadata, expires_at, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
             "#,
         )
         .bind(invoice.id.to_string())
@@ -558,6 +608,9 @@ impl Store for PostgresStore {
         .bind(invoice.amount.to_string())
         .bind(&invoice.currency)
         .bind(invoice.btc_amount_sats as i64)
+        .bind(invoice.paid_sats as i64)
+        .bind(invoice.confirmed_sats as i64)
+        .bind(invoice.unconfirmed_sats as i64)
         .bind(&invoice.onchain_address)
         .bind(invoice.onchain_address_index.map(|index| index as i64))
         .bind(&invoice.onchain_script_pubkey)
@@ -588,6 +641,7 @@ impl Store for PostgresStore {
         let Some(row) = sqlx::query(
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                   paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
                    rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
                    expires_at, created_at, updated_at
@@ -614,6 +668,7 @@ impl Store for PostgresStore {
         let Some(row) = sqlx::query(
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                   paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
                    rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
                    expires_at, created_at, updated_at
@@ -636,6 +691,7 @@ impl Store for PostgresStore {
         let rows = sqlx::query(
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                   paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
                    rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
                    expires_at, created_at, updated_at
@@ -656,6 +712,7 @@ impl Store for PostgresStore {
         let rows = sqlx::query(
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                   paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
                    rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
                    expires_at, created_at, updated_at
@@ -680,6 +737,7 @@ impl Store for PostgresStore {
         let rows = sqlx::query(
             r#"
             SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                   paid_sats, confirmed_sats, unconfirmed_sats,
                    onchain_address, onchain_address_index, onchain_script_pubkey,
                    rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
                    expires_at, created_at, updated_at
@@ -701,8 +759,7 @@ impl Store for PostgresStore {
         &self,
         store_id: &str,
         id: Uuid,
-        status: InvoiceStatus,
-        updated_at: DateTime<Utc>,
+        update: InvoiceStatusUpdate,
         event: &EventEnvelope,
         webhook_url: Option<&str>,
     ) -> anyhow::Result<()> {
@@ -710,12 +767,19 @@ impl Store for PostgresStore {
         sqlx::query(
             r#"
             UPDATE qpayd_invoices
-            SET status = $1, updated_at = $2
-            WHERE store_id = $3 AND id = $4
+            SET status = $1,
+                paid_sats = $2,
+                confirmed_sats = $3,
+                unconfirmed_sats = $4,
+                updated_at = $5
+            WHERE store_id = $6 AND id = $7
             "#,
         )
-        .bind(status.as_str())
-        .bind(updated_at.to_rfc3339())
+        .bind(update.status.as_str())
+        .bind(update.payment.paid_sats as i64)
+        .bind(update.payment.confirmed_sats as i64)
+        .bind(update.payment.unconfirmed_sats as i64)
+        .bind(update.updated_at.to_rfc3339())
         .bind(store_id)
         .bind(id.to_string())
         .execute(&mut *tx)
@@ -733,6 +797,34 @@ impl Store for PostgresStore {
         }
         tx.commit().await?;
 
+        Ok(())
+    }
+
+    async fn update_invoice_payment_amounts(
+        &self,
+        store_id: &str,
+        id: Uuid,
+        payment: PaymentAmounts,
+        updated_at: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE qpayd_invoices
+            SET paid_sats = $1,
+                confirmed_sats = $2,
+                unconfirmed_sats = $3,
+                updated_at = $4
+            WHERE store_id = $5 AND id = $6
+            "#,
+        )
+        .bind(payment.paid_sats as i64)
+        .bind(payment.confirmed_sats as i64)
+        .bind(payment.unconfirmed_sats as i64)
+        .bind(updated_at.to_rfc3339())
+        .bind(store_id)
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -953,6 +1045,21 @@ const SQLITE_MIGRATIONS: &[Migration] = &[
         CREATE UNIQUE INDEX IF NOT EXISTS invoices_store_idempotency_key_idx
         ON invoices (store_id, idempotency_key)
         WHERE idempotency_key IS NOT NULL
+            "#,
+        ],
+    },
+    Migration {
+        version: 3,
+        name: "invoice_payment_amounts",
+        statements: &[
+            r#"
+        ALTER TABLE invoices ADD COLUMN paid_sats INTEGER NOT NULL DEFAULT 0
+        "#,
+            r#"
+        ALTER TABLE invoices ADD COLUMN confirmed_sats INTEGER NOT NULL DEFAULT 0
+        "#,
+            r#"
+        ALTER TABLE invoices ADD COLUMN unconfirmed_sats INTEGER NOT NULL DEFAULT 0
         "#,
         ],
     },
@@ -1040,6 +1147,21 @@ const POSTGRES_MIGRATIONS: &[Migration] = &[
         CREATE UNIQUE INDEX IF NOT EXISTS qpayd_invoices_store_idempotency_key_idx
         ON qpayd_invoices (store_id, idempotency_key)
         WHERE idempotency_key IS NOT NULL
+            "#,
+        ],
+    },
+    Migration {
+        version: 3,
+        name: "invoice_payment_amounts",
+        statements: &[
+            r#"
+        ALTER TABLE qpayd_invoices ADD COLUMN paid_sats BIGINT NOT NULL DEFAULT 0
+        "#,
+            r#"
+        ALTER TABLE qpayd_invoices ADD COLUMN confirmed_sats BIGINT NOT NULL DEFAULT 0
+        "#,
+            r#"
+        ALTER TABLE qpayd_invoices ADD COLUMN unconfirmed_sats BIGINT NOT NULL DEFAULT 0
         "#,
         ],
     },
@@ -1228,6 +1350,9 @@ fn invoice_from_row(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<Invoice> {
         amount: row.get::<String, _>("amount").parse::<Decimal>()?,
         currency: row.get("currency"),
         btc_amount_sats: row.get::<i64, _>("btc_amount_sats") as u64,
+        paid_sats: row.get::<i64, _>("paid_sats") as u64,
+        confirmed_sats: row.get::<i64, _>("confirmed_sats") as u64,
+        unconfirmed_sats: row.get::<i64, _>("unconfirmed_sats") as u64,
         onchain_address: row.get("onchain_address"),
         onchain_address_index: row
             .get::<Option<i64>, _>("onchain_address_index")
@@ -1256,6 +1381,9 @@ fn invoice_from_pg_row(row: sqlx::postgres::PgRow) -> anyhow::Result<Invoice> {
         amount: row.get::<String, _>("amount").parse::<Decimal>()?,
         currency: row.get("currency"),
         btc_amount_sats: row.get::<i64, _>("btc_amount_sats") as u64,
+        paid_sats: row.get::<i64, _>("paid_sats") as u64,
+        confirmed_sats: row.get::<i64, _>("confirmed_sats") as u64,
+        unconfirmed_sats: row.get::<i64, _>("unconfirmed_sats") as u64,
         onchain_address: row.get("onchain_address"),
         onchain_address_index: row
             .get::<Option<i64>, _>("onchain_address_index")
@@ -1324,7 +1452,7 @@ mod tests {
     use super::{PostgresStore, SqliteStore, Store};
     use crate::{
         events::{invoice_created_event, invoice_status_event},
-        invoice::{Invoice, InvoiceStatus},
+        invoice::{Invoice, InvoiceStatus, InvoiceStatusUpdate, PaymentAmounts},
     };
 
     #[tokio::test]
@@ -1358,6 +1486,12 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn updates_payment_amounts_without_status_event() {
+        let store = test_store().await;
+        updates_payment_amounts_without_status_event_for(store.as_ref()).await;
+    }
+
+    #[tokio::test]
     async fn sqlite_migrate_records_initial_schema_once() {
         let path = std::env::temp_dir().join(format!("qpayd-migration-test-{}.db", Uuid::new_v4()));
         let store = SqliteStore::connect(&format!("sqlite://{}", path.display()))
@@ -1371,11 +1505,13 @@ mod tests {
             .fetch_all(&store.pool)
             .await
             .unwrap();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].get::<i64, _>("version"), 1);
         assert_eq!(rows[0].get::<String, _>("name"), "initial_schema");
         assert_eq!(rows[1].get::<i64, _>("version"), 2);
         assert_eq!(rows[1].get::<String, _>("name"), "invoice_idempotency_keys");
+        assert_eq!(rows[2].get::<i64, _>("version"), 3);
+        assert_eq!(rows[2].get::<String, _>("name"), "invoice_payment_amounts");
     }
 
     #[tokio::test]
@@ -1389,11 +1525,13 @@ mod tests {
                 .fetch_all(&store.pool)
                 .await
                 .unwrap();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].get::<i64, _>("version"), 1);
         assert_eq!(rows[0].get::<String, _>("name"), "initial_schema");
         assert_eq!(rows[1].get::<i64, _>("version"), 2);
         assert_eq!(rows[1].get::<String, _>("name"), "invoice_idempotency_keys");
+        assert_eq!(rows[2].get::<i64, _>("version"), 3);
+        assert_eq!(rows[2].get::<String, _>("name"), "invoice_payment_amounts");
 
         clean_pg_store(&store).await;
         insert_invoice_persists_event_and_webhook_delivery_for(&store).await;
@@ -1409,6 +1547,9 @@ mod tests {
 
         clean_pg_store(&store).await;
         expirable_invoices_include_only_unpaid_due_invoices_for(&store).await;
+
+        clean_pg_store(&store).await;
+        updates_payment_amounts_without_status_event_for(&store).await;
     }
 
     async fn insert_invoice_persists_event_and_webhook_delivery_for(store: &dyn Store) {
@@ -1423,6 +1564,9 @@ mod tests {
         let events = store.events(&invoice.store_id, 10).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, event.id);
+        assert_eq!(events[0].data["paid_sats"], 0);
+        assert_eq!(events[0].data["remaining_sats"], invoice.btc_amount_sats);
+        assert_eq!(events[0].data["overpaid_sats"], 0);
 
         let due = store.due_webhook_deliveries(10, Utc::now()).await.unwrap();
         assert_eq!(due.len(), 1);
@@ -1466,8 +1610,15 @@ mod tests {
             .update_invoice_status(
                 &invoice.store_id,
                 invoice.id,
-                InvoiceStatus::Settled,
-                updated_at,
+                InvoiceStatusUpdate {
+                    status: InvoiceStatus::Settled,
+                    payment: PaymentAmounts {
+                        paid_sats: 10_000,
+                        confirmed_sats: 10_000,
+                        unconfirmed_sats: 0,
+                    },
+                    updated_at,
+                },
                 &settled,
                 Some("https://example.com/webhook"),
             )
@@ -1477,8 +1628,15 @@ mod tests {
             .update_invoice_status(
                 &invoice.store_id,
                 invoice.id,
-                InvoiceStatus::Settled,
-                updated_at,
+                InvoiceStatusUpdate {
+                    status: InvoiceStatus::Settled,
+                    payment: PaymentAmounts {
+                        paid_sats: 10_000,
+                        confirmed_sats: 10_000,
+                        unconfirmed_sats: 0,
+                    },
+                    updated_at,
+                },
                 &settled,
                 Some("https://example.com/webhook"),
             )
@@ -1551,6 +1709,41 @@ mod tests {
         assert_eq!(ids, expected);
     }
 
+    async fn updates_payment_amounts_without_status_event_for(store: &dyn Store) {
+        let invoice = test_invoice(InvoiceStatus::PartiallyPaid);
+        let event = invoice_created_event(&invoice, invoice.created_at);
+        store.insert_invoice(&invoice, &event, None).await.unwrap();
+
+        let updated_at = Utc::now();
+        store
+            .update_invoice_payment_amounts(
+                &invoice.store_id,
+                invoice.id,
+                PaymentAmounts {
+                    paid_sats: 12_000,
+                    confirmed_sats: 10_000,
+                    unconfirmed_sats: 2_000,
+                },
+                updated_at,
+            )
+            .await
+            .unwrap();
+
+        let found = store
+            .invoice(&invoice.store_id, invoice.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.status, InvoiceStatus::PartiallyPaid);
+        assert_eq!(found.paid_sats, 12_000);
+        assert_eq!(found.confirmed_sats, 10_000);
+        assert_eq!(found.unconfirmed_sats, 2_000);
+
+        let events = store.events(&invoice.store_id, 10).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "invoice.created");
+    }
+
     async fn test_store() -> Box<dyn Store> {
         let path = std::env::temp_dir().join(format!("qpayd-test-{}.db", Uuid::new_v4()));
         let store = SqliteStore::connect(&format!("sqlite://{}", path.display()))
@@ -1613,6 +1806,9 @@ mod tests {
             amount: Decimal::from(10),
             currency: "USD".to_string(),
             btc_amount_sats: 10_000,
+            paid_sats: 0,
+            confirmed_sats: 0,
+            unconfirmed_sats: 0,
             onchain_address: Some("bc1qexample".to_string()),
             onchain_address_index: Some(0),
             onchain_script_pubkey: Some("0014".to_string()),

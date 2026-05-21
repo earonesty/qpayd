@@ -137,6 +137,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reports_partial_and_overpaid_statuses() {
+        let now = Utc::now();
+        let invoice = invoice(InvoiceStatus::New, now + Duration::minutes(15));
+        assert_eq!(
+            next_status(&invoice, now, 0, 5_000),
+            InvoiceStatus::PartiallyPaid
+        );
+        assert_eq!(
+            next_status(&invoice, now, 12_000, 0),
+            InvoiceStatus::Settled
+        );
+    }
+
     fn invoice(status: InvoiceStatus, expires_at: chrono::DateTime<Utc>) -> Invoice {
         Invoice {
             id: Uuid::new_v4(),
@@ -145,6 +159,9 @@ mod tests {
             amount: Decimal::from(1),
             currency: "USD".to_string(),
             btc_amount_sats: 10_000,
+            paid_sats: 0,
+            confirmed_sats: 0,
+            unconfirmed_sats: 0,
             onchain_address: Some("bc1qexample".to_string()),
             onchain_address_index: Some(0),
             onchain_script_pubkey: Some("0014".to_string()),

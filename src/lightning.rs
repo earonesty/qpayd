@@ -17,6 +17,12 @@ pub struct LightningInvoice {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LightningObservation {
+    pub received_sats: u64,
+    pub next_status: InvoiceStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SweepDecision {
     pub balance_sats: u64,
     pub amount_sats: Option<u64>,
@@ -53,7 +59,10 @@ pub async fn sweep_to_address(
     }
 }
 
-pub async fn observe(config: &LightningConfig, invoice: &Invoice) -> anyhow::Result<InvoiceStatus> {
+pub async fn observe(
+    config: &LightningConfig,
+    invoice: &Invoice,
+) -> anyhow::Result<LightningObservation> {
     match config.backend {
         LightningBackend::Phoenixd => observe_phoenixd_invoice(config, invoice).await,
         LightningBackend::Barkd => observe_barkd_invoice(config, invoice).await,
@@ -125,38 +134,44 @@ async fn create_phoenixd_invoice(
 async fn observe_phoenixd_invoice(
     config: &LightningConfig,
     invoice: &Invoice,
-) -> anyhow::Result<InvoiceStatus> {
+) -> anyhow::Result<LightningObservation> {
     let payment_hash = invoice
         .lightning_payment_hash
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("invoice has no lightning payment hash"))?;
     let payment = get_phoenixd_incoming_payment(config, payment_hash).await?;
-    Ok(next_status(
-        invoice.status,
-        invoice.expires_at,
-        Utc::now(),
-        payment.is_paid && payment.received_sat >= invoice.btc_amount_sats,
-    ))
+    let paid = payment.is_paid && payment.received_sat >= invoice.btc_amount_sats;
+    Ok(LightningObservation {
+        received_sats: if payment.is_paid {
+            payment.received_sat
+        } else {
+            invoice.paid_sats
+        },
+        next_status: next_status(invoice.status, invoice.expires_at, Utc::now(), paid),
+    })
 }
 
 async fn observe_barkd_invoice(
     config: &LightningConfig,
     invoice: &Invoice,
-) -> anyhow::Result<InvoiceStatus> {
+) -> anyhow::Result<LightningObservation> {
     let identifier = invoice
         .lightning_payment_hash
         .as_deref()
         .or(invoice.lightning_bolt11.as_deref())
         .ok_or_else(|| anyhow::anyhow!("invoice has no barkd lightning receive identifier"))?;
     let receive = get_barkd_receive(config, identifier).await?;
-    Ok(next_status(
-        invoice.status,
-        invoice.expires_at,
-        Utc::now(),
-        receive.finished_at.is_some()
-            && receive.preimage_revealed_at.is_some()
-            && receive.amount_sat >= invoice.btc_amount_sats,
-    ))
+    let paid = receive.finished_at.is_some()
+        && receive.preimage_revealed_at.is_some()
+        && receive.amount_sat >= invoice.btc_amount_sats;
+    Ok(LightningObservation {
+        received_sats: if paid {
+            receive.amount_sat
+        } else {
+            invoice.paid_sats
+        },
+        next_status: next_status(invoice.status, invoice.expires_at, Utc::now(), paid),
+    })
 }
 
 fn next_status(
@@ -590,7 +605,7 @@ mod tests {
             std::env::set_var(&env, "test-token");
         }
         let now = Utc::now();
-        let status = observe(
+        let observation = observe(
             &LightningConfig {
                 backend: LightningBackend::Barkd,
                 url: server,
@@ -603,6 +618,9 @@ mod tests {
                 amount: Decimal::ONE,
                 currency: "USD".to_string(),
                 btc_amount_sats: 1234,
+                paid_sats: 0,
+                confirmed_sats: 0,
+                unconfirmed_sats: 0,
                 onchain_address: None,
                 onchain_address_index: None,
                 onchain_script_pubkey: None,
@@ -619,7 +637,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(status, InvoiceStatus::Settled);
+        assert_eq!(observation.next_status, InvoiceStatus::Settled);
+        assert_eq!(observation.received_sats, 1234);
     }
 
     #[tokio::test]

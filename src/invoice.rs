@@ -11,6 +11,9 @@ pub struct Invoice {
     pub amount: Decimal,
     pub currency: String,
     pub btc_amount_sats: u64,
+    pub paid_sats: u64,
+    pub confirmed_sats: u64,
+    pub unconfirmed_sats: u64,
     pub onchain_address: Option<String>,
     pub onchain_address_index: Option<u32>,
     pub onchain_script_pubkey: Option<String>,
@@ -22,6 +25,30 @@ pub struct Invoice {
     pub metadata: serde_json::Value,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaymentAmounts {
+    pub paid_sats: u64,
+    pub confirmed_sats: u64,
+    pub unconfirmed_sats: u64,
+}
+
+impl PaymentAmounts {
+    pub fn from_invoice(invoice: &Invoice) -> Self {
+        Self {
+            paid_sats: invoice.paid_sats,
+            confirmed_sats: invoice.confirmed_sats,
+            unconfirmed_sats: invoice.unconfirmed_sats,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvoiceStatusUpdate {
+    pub status: InvoiceStatus,
+    pub payment: PaymentAmounts,
     pub updated_at: DateTime<Utc>,
 }
 
