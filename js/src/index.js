@@ -61,9 +61,17 @@ export class QPaydClient {
 
 export async function openPaymentLink(options) {
   const client = options.client ?? new QPaydClient({ baseUrl: options.baseUrl });
-  const invoice = await client.createPaymentLinkInvoice(options.storeId, options.paymentLinkId, {
-    idempotencyKey: options.idempotencyKey
-  });
+  let invoice;
+  try {
+    invoice = await client.createPaymentLinkInvoice(options.storeId, options.paymentLinkId, {
+      idempotencyKey: options.idempotencyKey
+    });
+  } catch (error) {
+    if (options.showErrors !== false && typeof document !== "undefined") {
+      return openCheckoutErrorModal(error);
+    }
+    throw error;
+  }
   return openInvoiceModal({
     ...options,
     client,
@@ -132,6 +140,39 @@ export function openInvoiceModal(options) {
   return {
     close,
     invoice: state.invoice,
+    element: root
+  };
+}
+
+function openCheckoutErrorModal(error) {
+  installStyles();
+
+  const root = document.createElement("div");
+  root.className = "qpayd-modal-root";
+  root.innerHTML = `
+    <div class="qpayd-backdrop"></div>
+    <section class="qpayd-modal" role="dialog" aria-modal="true" aria-label="Payment unavailable">
+      <header class="qpayd-head">
+        <div>
+          <strong>Payment unavailable</strong>
+          <span>Please try again shortly.</span>
+        </div>
+        <button type="button" data-qpayd-close aria-label="Close">x</button>
+      </header>
+      <p class="qpayd-error qpayd-error-panel">${escapeHtml(error.message)}</p>
+    </section>
+  `;
+  document.body.append(root);
+
+  const close = () => root.remove();
+  root.querySelector("[data-qpayd-close]").addEventListener("click", close);
+  root.addEventListener("click", (event) => {
+    if (event.target === root.querySelector(".qpayd-backdrop")) close();
+  });
+
+  return {
+    close,
+    error,
     element: root
   };
 }
@@ -282,6 +323,16 @@ function abbreviate(value) {
   return `${value.slice(0, ABBREVIATE_HEAD)}...${value.slice(-ABBREVIATE_TAIL)}`;
 }
 
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;"
+  })[char]);
+}
+
 function installStyles() {
   if (document.getElementById("qpayd-modal-styles")) return;
   const style = document.createElement("style");
@@ -310,6 +361,7 @@ function installStyles() {
     .qpayd-actions button, .qpayd-actions a { flex: 1; display: inline-flex; align-items: center; justify-content: center; min-height: 40px; border: 1px solid #27343f; border-radius: 8px; background: #17212b; color: #edf4f1; text-decoration: none; cursor: pointer; font: inherit; }
     .qpayd-note { margin: 0; padding: 0 18px 18px; color: #9fb0aa; font-size: 13px; }
     .qpayd-error { margin: 0; padding: 0 18px 18px; color: #ff7b72; font-size: 13px; }
+    .qpayd-error-panel { padding-top: 18px; }
   `;
   document.head.append(style);
 }
