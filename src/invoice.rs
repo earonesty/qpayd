@@ -62,8 +62,12 @@ pub struct Refund {
     pub status: RefundStatus,
     pub amount_sats: u64,
     pub destination: Option<String>,
+    pub destination_type: Option<RefundDestinationType>,
     pub reason: Option<String>,
     pub tx_id: Option<String>,
+    pub payment_proof: Option<String>,
+    pub failure_reason: Option<String>,
+    pub idempotency_key: Option<String>,
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -76,6 +80,7 @@ pub enum RefundStatus {
     Pending,
     Succeeded,
     Canceled,
+    Failed,
 }
 
 impl RefundStatus {
@@ -84,6 +89,7 @@ impl RefundStatus {
             Self::Pending => "pending",
             Self::Succeeded => "succeeded",
             Self::Canceled => "canceled",
+            Self::Failed => "failed",
         }
     }
 }
@@ -96,7 +102,45 @@ impl TryFrom<&str> for RefundStatus {
             "pending" => Ok(Self::Pending),
             "succeeded" => Ok(Self::Succeeded),
             "canceled" => Ok(Self::Canceled),
+            "failed" => Ok(Self::Failed),
             other => anyhow::bail!("invalid refund status {other}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefundDestinationType {
+    BitcoinAddress,
+    BitcoinUri,
+    LightningInvoice,
+    Lnurl,
+    Unknown,
+}
+
+impl RefundDestinationType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BitcoinAddress => "bitcoin_address",
+            Self::BitcoinUri => "bitcoin_uri",
+            Self::LightningInvoice => "lightning_invoice",
+            Self::Lnurl => "lnurl",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl TryFrom<&str> for RefundDestinationType {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "bitcoin_address" => Ok(Self::BitcoinAddress),
+            "bitcoin_uri" => Ok(Self::BitcoinUri),
+            "lightning_invoice" => Ok(Self::LightningInvoice),
+            "lnurl" => Ok(Self::Lnurl),
+            "unknown" => Ok(Self::Unknown),
+            other => anyhow::bail!("invalid refund destination type {other}"),
         }
     }
 }

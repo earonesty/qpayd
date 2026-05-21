@@ -50,6 +50,10 @@ pub fn refund_canceled_event(refund: &Refund, created_at: DateTime<Utc>) -> Even
     refund_event(refund, "refund.canceled", created_at)
 }
 
+pub fn refund_failed_event(refund: &Refund, created_at: DateTime<Utc>) -> EventEnvelope {
+    refund_event(refund, "refund.failed", created_at)
+}
+
 fn invoice_event(invoice: &Invoice, event_type: &str, created_at: DateTime<Utc>) -> EventEnvelope {
     let mut data = serde_json::to_value(invoice).expect("invoice serializes");
     if let Some(object) = data.as_object_mut() {

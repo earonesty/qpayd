@@ -26,6 +26,7 @@ Create an invoice-scoped refund record:
 ```sh
 curl -sS https://pay.example.com/v1/stores/main/invoices/$INVOICE_ID/refunds \
   -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN" \
+  -H "Idempotency-Key: refund_order_123" \
   -H "Content-Type: application/json" \
   -d '{
     "amount_sats": 2000,
@@ -40,7 +41,16 @@ Finalize it after the refund payment is sent:
 curl -sS -X POST https://pay.example.com/v1/stores/main/refunds/$REFUND_ID/finalize \
   -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{ "tx_id": "..." }'
+  -d '{ "tx_id": "...", "payment_proof": "..." }'
+```
+
+Mark it failed if the operator or refund executor cannot complete the payment:
+
+```sh
+curl -sS -X POST https://pay.example.com/v1/stores/main/refunds/$REFUND_ID/fail \
+  -H "Authorization: Bearer $QPAYD_MAIN_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "failure_reason": "expired lightning invoice" }'
 ```
 
 Cancel a pending refund:
@@ -51,4 +61,6 @@ curl -sS -X POST https://pay.example.com/v1/stores/main/refunds/$REFUND_ID/cance
 ```
 
 Pending and finalized refunds count against the invoice refundable balance.
-Canceled refunds do not.
+Canceled and failed refunds do not. Refund responses include optional
+`destination_type`, `idempotency_key`, `payment_proof`, and `failure_reason`
+fields.
