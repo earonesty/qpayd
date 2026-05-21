@@ -24,6 +24,9 @@ use crate::{
     storage::Store,
 };
 
+const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
+const MAX_IDEMPOTENCY_KEY_LEN: usize = 255;
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
@@ -104,6 +107,18 @@ async fn create_invoice(
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
     authorize(store_cfg, &headers)?;
+    let idempotency_key = idempotency_key_from_headers(&headers)?;
+    if let Some(key) = &idempotency_key
+        && let Some(invoice) = state
+            .store
+            .invoice_by_idempotency_key(&store_id, key)
+            .await?
+    {
+        return Ok(Json(InvoiceResponse::new(
+            invoice,
+            store_cfg.confirmations(),
+        )));
+    }
 
     let invoice = build_invoice(
         &state,
@@ -112,6 +127,7 @@ async fn create_invoice(
         request.amount,
         request.currency,
         request.metadata.unwrap_or_else(|| serde_json::json!({})),
+        idempotency_key,
     )
     .await?;
 
@@ -195,6 +211,18 @@ async fn create_public_payment_link_invoice(
         .payment_link(&payment_link_id)
         .ok_or(ApiError::not_found("payment link not found"))?;
     let cors = public_cors_for_payment_link(&state.config, store_cfg, payment_link, &headers)?;
+    let idempotency_key = idempotency_key_from_headers(&headers)?;
+    if let Some(key) = &idempotency_key
+        && let Some(invoice) = state
+            .store
+            .invoice_by_idempotency_key(&store_id, key)
+            .await?
+    {
+        return json_public_response(
+            PublicInvoiceResponse::new(invoice, store_cfg.confirmations()),
+            cors,
+        );
+    }
 
     let invoice = build_invoice(
         &state,
@@ -203,6 +231,7 @@ async fn create_public_payment_link_invoice(
         payment_link.amount,
         payment_link.currency.clone(),
         payment_link.metadata.clone(),
+        idempotency_key,
     )
     .await?;
 
@@ -248,6 +277,7 @@ async fn build_invoice(
     amount: Decimal,
     currency: String,
     metadata: serde_json::Value,
+    idempotency_key: Option<String>,
 ) -> anyhow::Result<Invoice> {
     let currency = currency.to_uppercase();
     let rate = state.pricing.btc_rate(&currency).await?;
@@ -299,6 +329,7 @@ async fn build_invoice(
             .as_ref()
             .map(|invoice| invoice.bolt11.clone()),
         lightning_payment_hash: lightning_invoice.and_then(|invoice| invoice.payment_hash),
+        idempotency_key,
         rate_source: rate.source,
         rate: rate.value,
         metadata,
@@ -308,10 +339,21 @@ async fn build_invoice(
     };
 
     let event = events::invoice_created_event(&invoice, now);
-    state
+    if let Err(error) = state
         .store
         .insert_invoice(&invoice, &event, store_cfg.webhook_url.as_deref())
-        .await?;
+        .await
+    {
+        if let Some(key) = &invoice.idempotency_key
+            && let Some(existing) = state
+                .store
+                .invoice_by_idempotency_key(&invoice.store_id, key)
+                .await?
+        {
+            return Ok(existing);
+        }
+        return Err(error);
+    }
 
     Ok(invoice)
 }
@@ -563,12 +605,33 @@ fn add_public_cors_headers(headers: &mut HeaderMap, cors: PublicCors) {
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("content-type"),
+        HeaderValue::from_static("content-type,idempotency-key"),
     );
     headers.insert(
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
         HeaderValue::from_static("content-type"),
     );
+}
+
+fn idempotency_key_from_headers(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    let Some(value) = headers.get(IDEMPOTENCY_KEY_HEADER) else {
+        return Ok(None);
+    };
+    let key = value
+        .to_str()
+        .map_err(|_| ApiError::bad_request("Idempotency-Key must be valid ASCII"))?;
+    if key.is_empty() {
+        return Err(ApiError::bad_request("Idempotency-Key cannot be empty"));
+    }
+    if key.trim() != key {
+        return Err(ApiError::bad_request(
+            "Idempotency-Key cannot contain surrounding whitespace",
+        ));
+    }
+    if key.len() > MAX_IDEMPOTENCY_KEY_LEN {
+        return Err(ApiError::bad_request("Idempotency-Key is too long"));
+    }
+    Ok(Some(key.to_string()))
 }
 
 fn svg_qr_response(value: &str, cors: PublicCors) -> Result<Response, ApiError> {
@@ -857,6 +920,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_invoice_reuses_idempotency_key() {
+        // SAFETY: this test uses a single fixed value and does not depend on
+        // concurrent mutation of the same environment variable.
+        unsafe {
+            std::env::set_var("QPAYD_MAIN_API_TOKEN", "test-token");
+        }
+        let app = test_app().await;
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/stores/main/invoices")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("Idempotency-Key", "order-123")
+                    .body(Body::from(r#"{"amount":"10.00","currency":"USD"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let first: serde_json::Value =
+            serde_json::from_slice(&to_bytes(first.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/stores/main/invoices")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("Idempotency-Key", "order-123")
+                    .body(Body::from(r#"{"amount":"10.00","currency":"USD"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let second: serde_json::Value =
+            serde_json::from_slice(&to_bytes(second.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+
+        assert_eq!(second["id"], first["id"]);
+        assert_eq!(
+            second["onchain_address_index"],
+            first["onchain_address_index"]
+        );
+    }
+
+    #[tokio::test]
     async fn public_payment_link_creates_invoice_json() {
         let app = test_app().await;
 
@@ -915,6 +1031,51 @@ mod tests {
         );
         let qr_body = to_bytes(qr_response.into_body(), usize::MAX).await.unwrap();
         assert!(std::str::from_utf8(&qr_body).unwrap().contains("<svg"));
+    }
+
+    #[tokio::test]
+    async fn public_payment_link_reuses_idempotency_key() {
+        let app = test_app().await;
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/public/stores/main/payment-links/donate-10/invoices")
+                    .header("Idempotency-Key", "browser-click-1")
+                    .header(header::ORIGIN, "https://shop.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(first.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+        let first: serde_json::Value =
+            serde_json::from_slice(&to_bytes(first.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/public/stores/main/payment-links/donate-10/invoices")
+                    .header("Idempotency-Key", "browser-click-1")
+                    .header(header::ORIGIN, "https://shop.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(second.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+        let second: serde_json::Value =
+            serde_json::from_slice(&to_bytes(second.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+
+        assert_eq!(second["id"], first["id"]);
+        assert_eq!(second["bitcoin"]["address"], first["bitcoin"]["address"]);
     }
 
     #[tokio::test]
@@ -1042,6 +1203,10 @@ mod tests {
         assert_eq!(
             allowed.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
             "https://shop.example"
+        );
+        assert_eq!(
+            allowed.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS],
+            "content-type,idempotency-key"
         );
 
         let rejected = app

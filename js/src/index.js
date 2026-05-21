@@ -16,10 +16,12 @@ export class QPaydClient {
     }
   }
 
-  async createPaymentLinkInvoice(storeId, paymentLinkId) {
+  async createPaymentLinkInvoice(storeId, paymentLinkId, options = {}) {
+    const headers = {};
+    if (options.idempotencyKey) headers["Idempotency-Key"] = options.idempotencyKey;
     return this.#json(
       `/v1/public/stores/${encodeURIComponent(storeId)}/payment-links/${encodeURIComponent(paymentLinkId)}/invoices`,
-      { method: "POST" }
+      { method: "POST", headers }
     );
   }
 
@@ -59,7 +61,9 @@ export class QPaydClient {
 
 export async function openPaymentLink(options) {
   const client = options.client ?? new QPaydClient({ baseUrl: options.baseUrl });
-  const invoice = await client.createPaymentLinkInvoice(options.storeId, options.paymentLinkId);
+  const invoice = await client.createPaymentLinkInvoice(options.storeId, options.paymentLinkId, {
+    idempotencyKey: options.idempotencyKey
+  });
   return openInvoiceModal({
     ...options,
     client,

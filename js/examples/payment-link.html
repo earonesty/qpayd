@@ -15,6 +15,7 @@
         baseUrl: "https://pay.example.com",
         storeId: "main",
         paymentLinkId: "donate-10",
+        idempotencyKey: crypto.randomUUID(),
         onSettled(invoice) {
           console.log("paid", invoice.id);
         }

@@ -150,6 +150,7 @@ mod tests {
             onchain_script_pubkey: Some("0014".to_string()),
             lightning_bolt11: None,
             lightning_payment_hash: None,
+            idempotency_key: None,
             rate_source: "test".to_string(),
             rate: Decimal::from(100_000),
             metadata: serde_json::json!({}),
