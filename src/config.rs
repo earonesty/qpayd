@@ -55,6 +55,8 @@ pub struct StoreConfig {
     pub id: String,
     pub name: String,
     pub api_token_env: String,
+    pub admin_token_env: Option<String>,
+    pub refund_token_env: Option<String>,
     #[serde(default)]
     pub public_allowed_origins: Vec<String>,
     #[serde(default)]
@@ -202,6 +204,42 @@ impl Config {
             }
             if !ids.insert(store.id.as_str()) {
                 bail!("duplicate store id {}", store.id);
+            }
+            validate_token_env(
+                &format!("store {} api_token_env", store.id),
+                &store.api_token_env,
+            )?;
+            if let Some(admin_token_env) = &store.admin_token_env {
+                validate_token_env(
+                    &format!("store {} admin_token_env", store.id),
+                    admin_token_env,
+                )?;
+                if admin_token_env == &store.api_token_env {
+                    bail!(
+                        "store {} admin_token_env must be separate from api_token_env",
+                        store.id
+                    );
+                }
+            }
+            if let Some(refund_token_env) = &store.refund_token_env {
+                validate_token_env(
+                    &format!("store {} refund_token_env", store.id),
+                    refund_token_env,
+                )?;
+                if refund_token_env == &store.api_token_env {
+                    bail!(
+                        "store {} refund_token_env must be separate from api_token_env",
+                        store.id
+                    );
+                }
+                if let Some(admin_token_env) = &store.admin_token_env
+                    && refund_token_env == admin_token_env
+                {
+                    bail!(
+                        "store {} refund_token_env must be separate from admin_token_env",
+                        store.id
+                    );
+                }
             }
             if store.webhook_url.is_some() && store.webhook_secret_env.is_none() {
                 bail!("store {} webhook_url requires webhook_secret_env", store.id);
@@ -408,8 +446,21 @@ impl LightningSweepConfig {
 
 impl StoreConfig {
     pub fn api_token(&self) -> anyhow::Result<String> {
-        std::env::var(&self.api_token_env)
-            .with_context(|| format!("missing env var {}", self.api_token_env))
+        token_from_env(&self.api_token_env)
+    }
+
+    pub fn admin_token(&self) -> anyhow::Result<String> {
+        match &self.admin_token_env {
+            Some(env) => token_from_env(env),
+            None => self.api_token(),
+        }
+    }
+
+    pub fn refund_token(&self) -> anyhow::Result<String> {
+        match (&self.refund_token_env, &self.admin_token_env) {
+            (Some(env), _) | (None, Some(env)) => token_from_env(env),
+            (None, None) => self.api_token(),
+        }
     }
 
     pub fn expiry_minutes(&self) -> u32 {
@@ -431,6 +482,10 @@ impl StoreConfig {
     pub fn payment_link(&self, id: &str) -> Option<&PaymentLinkConfig> {
         self.payment_links.iter().find(|link| link.id == id)
     }
+}
+
+fn token_from_env(env: &str) -> anyhow::Result<String> {
+    std::env::var(env).with_context(|| format!("missing env var {}", env))
 }
 
 impl OnchainConfig {
@@ -534,6 +589,13 @@ fn validate_hot_wallet_refunds(store_id: &str, hot_wallet: &HotWalletConfig) -> 
             "store {store_id} hot_wallet {} refund_poll_seconds must be greater than zero",
             hot_wallet.id
         );
+    }
+    Ok(())
+}
+
+fn validate_token_env(scope: &str, env: &str) -> anyhow::Result<()> {
+    if env.trim() != env || env.is_empty() {
+        bail!("{scope} cannot be empty or contain surrounding whitespace");
     }
     Ok(())
 }
@@ -771,6 +833,56 @@ mod tests {
         .unwrap();
 
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validates_scoped_store_token_envs() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+            admin_token_env = "QPAYD_MAIN_ADMIN_TOKEN"
+            refund_token_env = "QPAYD_MAIN_REFUND_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+            "#,
+        )
+        .unwrap();
+
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_shared_scoped_store_token_envs() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+            refund_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+            "#,
+        )
+        .unwrap();
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("refund_token_env must be separate"));
     }
 
     #[test]

@@ -20,6 +20,9 @@ stale_after_seconds = 60
 id = "main"
 name = "Main Store"
 api_token_env = "QPAYD_MAIN_API_TOKEN"
+# Optional scoped tokens. If omitted, qpayd falls back to api_token_env.
+# admin_token_env = "QPAYD_MAIN_ADMIN_TOKEN"
+# refund_token_env = "QPAYD_MAIN_REFUND_TOKEN"
 invoice_expiry_minutes = 15
 min_confirmations = 1
 # public_allowed_origins = ["https://example.com"]
