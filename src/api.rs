@@ -591,6 +591,11 @@ async fn create_refund_for_invoice(
         .store(&store_id)
         .ok_or(ApiError::not_found("store not found"))?;
     authorize(store_cfg, &headers)?;
+    let invoice = state
+        .store
+        .invoice(&store_id, invoice_id)
+        .await?
+        .ok_or(ApiError::not_found("invoice not found"))?;
     let idempotency_key = idempotency_key_from_headers(&headers)?;
     if let Some(key) = &idempotency_key
         && let Some(refund) = state
@@ -598,14 +603,10 @@ async fn create_refund_for_invoice(
             .refund_by_idempotency_key(&store_id, key)
             .await?
     {
+        ensure_refund_matches_invoice(&refund, invoice.id)?;
         return Ok(Json(refund));
     }
 
-    let invoice = state
-        .store
-        .invoice(&store_id, invoice_id)
-        .await?
-        .ok_or(ApiError::not_found("invoice not found"))?;
     let refunds = state
         .store
         .refunds_for_invoice(&store_id, invoice.id)
@@ -655,6 +656,7 @@ async fn create_refund_for_invoice(
                 .refund_by_idempotency_key(&store_id, key)
                 .await?
         {
+            ensure_refund_matches_invoice(&existing, invoice.id)?;
             return Ok(Json(existing));
         }
         return Err(error.into());
@@ -1506,32 +1508,51 @@ fn refund_summary(
     }
 }
 
+fn ensure_refund_matches_invoice(refund: &Refund, invoice_id: Uuid) -> Result<(), ApiError> {
+    if refund.invoice_id == invoice_id {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(
+            "Idempotency-Key is already used for a different invoice",
+        ))
+    }
+}
+
 fn refund_destination_type(destination: &str) -> RefundDestinationType {
     let value = destination.trim();
     let lower = value.to_ascii_lowercase();
-    if lower.starts_with("bitcoin:") {
+    if lower.starts_with("bitcoin:") && lower.len() > "bitcoin:".len() {
         RefundDestinationType::BitcoinUri
-    } else if lower.starts_with("lightning:")
-        || lower.starts_with("lnbc")
-        || lower.starts_with("lntb")
-        || lower.starts_with("lnbcrt")
+    } else if (lower.starts_with("lightning:") && lower.len() > "lightning:".len())
+        || looks_like_bolt11(&lower)
     {
         RefundDestinationType::LightningInvoice
-    } else if lower.starts_with("lnurl") || lower.starts_with("lnurlp") {
+    } else if looks_like_lnurl(&lower) {
         RefundDestinationType::Lnurl
-    } else if lower.starts_with("bc1")
-        || lower.starts_with("tb1")
-        || lower.starts_with("bcrt1")
-        || value.starts_with('1')
-        || value.starts_with('3')
-        || value.starts_with('m')
-        || value.starts_with('n')
-        || value.starts_with('2')
-    {
+    } else if looks_like_bitcoin_address(value, &lower) {
         RefundDestinationType::BitcoinAddress
     } else {
         RefundDestinationType::Unknown
     }
+}
+
+fn looks_like_bolt11(lower: &str) -> bool {
+    (lower.starts_with("lnbc") && lower.len() > 8)
+        || (lower.starts_with("lntb") && lower.len() > 8)
+        || (lower.starts_with("lnbcrt") && lower.len() > 10)
+}
+
+fn looks_like_lnurl(lower: &str) -> bool {
+    lower.starts_with("lnurl1") && lower.len() > 12
+}
+
+fn looks_like_bitcoin_address(value: &str, lower: &str) -> bool {
+    let len = value.len();
+    ((lower.starts_with("bc1") || lower.starts_with("tb1") || lower.starts_with("bcrt1"))
+        && len >= 14)
+        || ((value.starts_with('1') || value.starts_with('3')) && (26..=62).contains(&len))
+        || ((value.starts_with('m') || value.starts_with('n') || value.starts_with('2'))
+            && (26..=62).contains(&len))
 }
 
 #[derive(Debug, Serialize)]
@@ -1689,10 +1710,10 @@ mod tests {
     use rust_decimal::Decimal;
     use tower::ServiceExt;
 
-    use super::{AppState, router, sats_for};
+    use super::{AppState, refund_destination_type, router, sats_for};
     use crate::{
         config::Config,
-        invoice::PaymentAmounts,
+        invoice::{PaymentAmounts, RefundDestinationType},
         pricing::{Rate, RateSource},
         storage::{SqliteStore, Store},
     };
@@ -1910,7 +1931,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .header("Idempotency-Key", "refund-order-1")
                     .body(Body::from(
-                        r#"{"amount_sats":2000,"destination":"bc1qrefund","reason":"overpayment"}"#,
+                        r#"{"amount_sats":2000,"destination":"bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh","reason":"overpayment"}"#,
                     ))
                     .unwrap(),
             )
@@ -1999,6 +2020,88 @@ mod tests {
                 .unwrap();
         assert_eq!(summary["already_refunded_sats"], 0);
         assert_eq!(summary["refundable_sats"], 12_000);
+    }
+
+    #[tokio::test]
+    async fn refund_idempotency_key_cannot_replay_across_invoices() {
+        // SAFETY: this test uses a single fixed value and does not depend on
+        // concurrent mutation of the same environment variable.
+        unsafe {
+            std::env::set_var("QPAYD_MAIN_API_TOKEN", "test-token");
+        }
+        let (app, store) = test_app_and_store().await;
+
+        let mut invoice_ids = Vec::new();
+        for _ in 0..2 {
+            let created = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/stores/main/invoices")
+                        .header(header::AUTHORIZATION, "Bearer test-token")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(r#"{"amount":"10.00","currency":"USD"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let created: serde_json::Value =
+                serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            let invoice_id = uuid::Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+            store
+                .update_invoice_payment_amounts(
+                    "main",
+                    invoice_id,
+                    PaymentAmounts {
+                        paid_sats: 12_000,
+                        confirmed_sats: 12_000,
+                        unconfirmed_sats: 0,
+                    },
+                    chrono::Utc::now(),
+                )
+                .await
+                .unwrap();
+            invoice_ids.push(invoice_id);
+        }
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/stores/main/invoices/{}/refunds",
+                        invoice_ids[0]
+                    ))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("Idempotency-Key", "shared-refund-key")
+                    .body(Body::from(r#"{"amount_sats":2000}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/stores/main/invoices/{}/refunds",
+                        invoice_ids[1]
+                    ))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("Idempotency-Key", "shared-refund-key")
+                    .body(Body::from(r#"{"amount_sats":2000}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -2134,6 +2237,38 @@ mod tests {
                 .unwrap();
         assert_eq!(failed["status"], "failed");
         assert_eq!(failed["failure_reason"], "expired invoice");
+    }
+
+    #[test]
+    fn refund_destination_type_requires_realistic_prefixes() {
+        assert_eq!(
+            refund_destination_type("bc1"),
+            RefundDestinationType::Unknown
+        );
+        assert_eq!(
+            refund_destination_type("lnbc"),
+            RefundDestinationType::Unknown
+        );
+        assert_eq!(
+            refund_destination_type("lnurl"),
+            RefundDestinationType::Unknown
+        );
+        assert_eq!(
+            refund_destination_type("bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"),
+            RefundDestinationType::BitcoinAddress
+        );
+        assert_eq!(
+            refund_destination_type("bitcoin:bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"),
+            RefundDestinationType::BitcoinUri
+        );
+        assert_eq!(
+            refund_destination_type("lnbc2500u1pwywxzwpp5jptserfk4zkc6hvfqqqsq9w"),
+            RefundDestinationType::LightningInvoice
+        );
+        assert_eq!(
+            refund_destination_type("lnurl1dp68gurn8ghj7mrww4exctnrdakj7"),
+            RefundDestinationType::Lnurl
+        );
     }
 
     #[tokio::test]
