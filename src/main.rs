@@ -174,6 +174,19 @@ async fn sync_once(config: Config, store: Arc<dyn Store>) -> anyhow::Result<()> 
                 .await?;
             }
         }
+
+        let invoices = store
+            .expirable_invoices(&store_config.id, chrono::Utc::now())
+            .await?;
+        for invoice in invoices {
+            update_invoice_status_event(
+                store.clone(),
+                store_config.webhook_url.as_deref(),
+                invoice,
+                invoice::InvoiceStatus::Expired,
+            )
+            .await?;
+        }
     }
     Ok(())
 }

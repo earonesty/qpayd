@@ -33,6 +33,11 @@ pub trait Store: Send + Sync {
     ) -> anyhow::Result<Option<Invoice>>;
     async fn active_onchain_invoices(&self, store_id: &str) -> anyhow::Result<Vec<Invoice>>;
     async fn active_lightning_invoices(&self, store_id: &str) -> anyhow::Result<Vec<Invoice>>;
+    async fn expirable_invoices(
+        &self,
+        store_id: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<Invoice>>;
     async fn update_invoice_status(
         &self,
         store_id: &str,
@@ -286,6 +291,31 @@ impl Store for SqliteStore {
             "#,
         )
         .bind(store_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(invoice_from_row).collect()
+    }
+
+    async fn expirable_invoices(
+        &self,
+        store_id: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<Invoice>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                   onchain_address, onchain_address_index, onchain_script_pubkey,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                   expires_at, created_at, updated_at
+            FROM invoices
+            WHERE store_id = ?
+              AND status IN ('new', 'partially_paid')
+              AND expires_at <= ?
+            "#,
+        )
+        .bind(store_id)
+        .bind(now.to_rfc3339())
         .fetch_all(&self.pool)
         .await?;
 
@@ -636,6 +666,31 @@ impl Store for PostgresStore {
             "#,
         )
         .bind(store_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(invoice_from_pg_row).collect()
+    }
+
+    async fn expirable_invoices(
+        &self,
+        store_id: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<Invoice>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, store_id, status, amount, currency, btc_amount_sats,
+                   onchain_address, onchain_address_index, onchain_script_pubkey,
+                   rate_source, rate, lightning_bolt11, lightning_payment_hash, idempotency_key, metadata,
+                   expires_at, created_at, updated_at
+            FROM qpayd_invoices
+            WHERE store_id = $1
+              AND status IN ('new', 'partially_paid')
+              AND expires_at <= $2
+            "#,
+        )
+        .bind(store_id)
+        .bind(now.to_rfc3339())
         .fetch_all(&self.pool)
         .await?;
 
@@ -1297,6 +1352,12 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expirable_invoices_include_only_unpaid_due_invoices() {
+        let store = test_store().await;
+        expirable_invoices_include_only_unpaid_due_invoices_for(store.as_ref()).await;
+    }
+
+    #[tokio::test]
     async fn sqlite_migrate_records_initial_schema_once() {
         let path = std::env::temp_dir().join(format!("qpayd-migration-test-{}.db", Uuid::new_v4()));
         let store = SqliteStore::connect(&format!("sqlite://{}", path.display()))
@@ -1345,6 +1406,9 @@ mod tests {
 
         clean_pg_store(&store).await;
         idempotency_key_finds_original_invoice_for(&store).await;
+
+        clean_pg_store(&store).await;
+        expirable_invoices_include_only_unpaid_due_invoices_for(&store).await;
     }
 
     async fn insert_invoice_persists_event_and_webhook_delivery_for(store: &dyn Store) {
@@ -1443,6 +1507,48 @@ mod tests {
         assert_eq!(found.id, invoice.id);
         assert_eq!(found.onchain_address_index, invoice.onchain_address_index);
         assert_eq!(found.idempotency_key.as_deref(), Some("retry-key-1"));
+    }
+
+    async fn expirable_invoices_include_only_unpaid_due_invoices_for(store: &dyn Store) {
+        let now = Utc::now();
+        let mut due_new = test_invoice(InvoiceStatus::New);
+        due_new.expires_at = now - Duration::minutes(1);
+        due_new.created_at = now - Duration::minutes(20);
+        due_new.updated_at = due_new.created_at;
+
+        let mut due_partial = test_invoice(InvoiceStatus::PartiallyPaid);
+        due_partial.id = Uuid::new_v4();
+        due_partial.expires_at = now - Duration::minutes(1);
+        due_partial.created_at = now - Duration::minutes(20);
+        due_partial.updated_at = due_partial.created_at;
+
+        let mut payment_detected = test_invoice(InvoiceStatus::PaymentDetected);
+        payment_detected.id = Uuid::new_v4();
+        payment_detected.expires_at = now - Duration::minutes(1);
+        payment_detected.created_at = now - Duration::minutes(20);
+        payment_detected.updated_at = payment_detected.created_at;
+
+        let mut not_due = test_invoice(InvoiceStatus::New);
+        not_due.id = Uuid::new_v4();
+        not_due.expires_at = now + Duration::minutes(1);
+
+        for invoice in [&due_new, &due_partial, &payment_detected, &not_due] {
+            let event = invoice_created_event(invoice, invoice.created_at);
+            store.insert_invoice(invoice, &event, None).await.unwrap();
+        }
+
+        let mut ids = store
+            .expirable_invoices("main", now)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|invoice| invoice.id)
+            .collect::<Vec<_>>();
+        ids.sort();
+
+        let mut expected = vec![due_new.id, due_partial.id];
+        expected.sort();
+        assert_eq!(ids, expected);
     }
 
     async fn test_store() -> Box<dyn Store> {
