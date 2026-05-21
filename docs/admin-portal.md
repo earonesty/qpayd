@@ -60,4 +60,17 @@ Set `store_id = "main"` to pin the hosted `/admin` page to one store. If
 `store_id` is omitted, the page does not publish store ids in the HTML. After
 login, qpayd returns the stores and scopes available to the submitted token.
 
+Verify token routing after deploy:
+
+```sh
+curl -sS https://pay.example.com/v1/admin/session \
+  -H "Authorization: Bearer $QPAYD_MAIN_ADMIN_TOKEN"
+```
+
+Open `/admin`, sign in with the same token, and confirm the store and view match
+the returned scopes. With `store_id = "main"`, the page should only accept
+tokens for that store. With `store_id` omitted, a token that reaches more than
+one store should show a store selector. Repeat with a token that should not have
+access and confirm qpayd rejects it.
+
 Remote admin assets require `asset_integrity` and must use `https`.

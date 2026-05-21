@@ -213,6 +213,9 @@ async fn admin_session(
     let token = bearer_token(&headers)?;
     let mut stores = Vec::new();
     for store in &state.config.stores {
+        if !admin_origin_allowed_for_store(store, &headers)? {
+            continue;
+        }
         let admin = token_matches(token, &store.admin_token(&state.config.auth)?);
         let payout = token_matches(token, &store.payout_token(&state.config.auth)?)
             || (admin && store.admin_token_can_payout(&state.config.auth));
@@ -1368,6 +1371,22 @@ fn admin_cors_for_session(config: &Config, headers: &HeaderMap) -> Result<Public
     }
 }
 
+fn admin_origin_allowed_for_store(
+    store: &StoreConfig,
+    headers: &HeaderMap,
+) -> Result<bool, ApiError> {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return Ok(true);
+    };
+    let origin_str = origin
+        .to_str()
+        .map_err(|_| ApiError::forbidden("origin not allowed"))?;
+    Ok(store
+        .admin_allowed_origins
+        .iter()
+        .any(|allowed| same_origin(allowed, origin_str)))
+}
+
 fn admin_csp(asset_source: &str) -> String {
     let script_source = if asset_source.starts_with("https://") {
         Url::parse(asset_source)
@@ -2182,6 +2201,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_session_filters_authorized_stores_by_origin() {
+        unsafe {
+            std::env::set_var("QPAYD_MAIN_API_TOKEN", "test-token");
+            std::env::set_var("QPAYD_SECOND_API_TOKEN", "second-token");
+            std::env::set_var("QPAYD_GLOBAL_ADMIN_TOKEN", "global-admin-token");
+        }
+        let mut config = test_config();
+        config.auth.admin_token_env = Some("QPAYD_GLOBAL_ADMIN_TOKEN".to_string());
+        config.stores[0].admin_allowed_origins = vec!["https://main.example".to_string()];
+        let mut second = config.stores[0].clone();
+        second.id = "second".to_string();
+        second.name = "Second Store".to_string();
+        second.api_token_env = Some("QPAYD_SECOND_API_TOKEN".to_string());
+        second.admin_allowed_origins = vec!["https://second.example".to_string()];
+        config.stores.push(second);
+        let app = test_app_with_config(config).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/admin/session")
+                    .header(header::ORIGIN, "https://second.example")
+                    .header(header::AUTHORIZATION, "Bearer global-admin-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["stores"].as_array().unwrap().len(), 1);
+        assert_eq!(body["stores"][0]["id"], "second");
     }
 
     #[tokio::test]

@@ -134,6 +134,7 @@ export function mountQPaydAdmin(target, options) {
     stores: [],
     selectedStore: null,
     scopes: [],
+    storeRequestId: 0,
     remember: false,
     invoices: [],
     refunds: [],
@@ -206,6 +207,7 @@ function bind(root, state) {
     state.stores = [];
     state.selectedStore = null;
     state.scopes = [];
+    state.storeRequestId++;
     state.invoices = [];
     state.refunds = [];
     state.selectedInvoice = null;
@@ -267,6 +269,7 @@ async function selectStore(root, state, storeId, rerender = true) {
     return;
   }
   state.client.setStore(store.id);
+  const requestId = ++state.storeRequestId;
   state.selectedStore = store;
   state.scopes = store.scopes ?? [];
   state.invoices = [];
@@ -275,53 +278,63 @@ async function selectStore(root, state, storeId, rerender = true) {
   state.refundSummary = null;
   if (!state.fixedStoreId) localStorage.setItem(`${state.storageKey}:store`, store.id);
   if (rerender) render(root, state);
-  await refreshCurrentView(root, state);
+  await refreshCurrentView(root, state, requestId);
 }
 
-async function refreshCurrentView(root, state) {
+async function refreshCurrentView(root, state, requestId = state.storeRequestId) {
   if (state.scopes.includes("admin")) {
-    await refreshInvoices(root, state);
+    await refreshInvoices(root, state, requestId);
   } else if (state.scopes.includes("payout")) {
-    await refreshRefunds(root, state);
+    await refreshRefunds(root, state, requestId);
   }
 }
 
-async function refreshInvoices(root, state) {
+async function refreshInvoices(root, state, requestId = state.storeRequestId) {
   state.error = "";
   state.notice = "";
   render(root, state);
   try {
-    state.invoices = await state.client.listInvoices({ status: state.status, limit: DEFAULT_LIMIT });
+    const invoices = await state.client.listInvoices({ status: state.status, limit: DEFAULT_LIMIT });
+    if (requestId !== state.storeRequestId) return;
+    state.invoices = invoices;
     if (!state.selectedInvoice && state.invoices[0]) {
-      await loadInvoice(root, state, state.invoices[0].id, false);
+      await loadInvoice(root, state, state.invoices[0].id, false, requestId);
       return;
     }
   } catch (error) {
+    if (requestId !== state.storeRequestId) return;
     state.error = error.message;
   }
   render(root, state);
 }
 
-async function refreshRefunds(root, state) {
+async function refreshRefunds(root, state, requestId = state.storeRequestId) {
   state.error = "";
   state.notice = "";
   render(root, state);
   try {
-    state.refunds = await state.client.listRefunds({ limit: DEFAULT_LIMIT });
+    const refunds = await state.client.listRefunds({ limit: DEFAULT_LIMIT });
+    if (requestId !== state.storeRequestId) return;
+    state.refunds = refunds;
   } catch (error) {
+    if (requestId !== state.storeRequestId) return;
     state.error = error.message;
   }
   render(root, state);
 }
 
-async function loadInvoice(root, state, invoiceId, rerender = true) {
+async function loadInvoice(root, state, invoiceId, rerender = true, requestId = state.storeRequestId) {
   state.error = "";
   state.notice = "";
   if (rerender) render(root, state);
   try {
-    state.selectedInvoice = await state.client.getInvoice(invoiceId);
-    state.refundSummary = await state.client.getRefundSummary(invoiceId);
+    const invoice = await state.client.getInvoice(invoiceId);
+    const refundSummary = await state.client.getRefundSummary(invoiceId);
+    if (requestId !== state.storeRequestId) return;
+    state.selectedInvoice = invoice;
+    state.refundSummary = refundSummary;
   } catch (error) {
+    if (requestId !== state.storeRequestId) return;
     state.error = error.message;
   }
   render(root, state);
@@ -361,7 +374,7 @@ async function finalizeRefund(root, state, refundId) {
       paymentProof: paymentProof.trim()
     });
     state.notice = "Refund finalized";
-    await loadInvoice(root, state, state.selectedInvoice.id, false);
+    await refreshAfterRefundAction(root, state);
   } catch (error) {
     state.error = error.message;
     render(root, state);
@@ -375,7 +388,7 @@ async function failRefund(root, state, refundId) {
   try {
     await state.client.failRefund(refundId, failureReason.trim());
     state.notice = "Refund failed";
-    await loadInvoice(root, state, state.selectedInvoice.id, false);
+    await refreshAfterRefundAction(root, state);
   } catch (error) {
     state.error = error.message;
     render(root, state);
@@ -387,10 +400,18 @@ async function cancelRefund(root, state, refundId) {
   try {
     await state.client.cancelRefund(refundId);
     state.notice = "Refund canceled";
-    await loadInvoice(root, state, state.selectedInvoice.id, false);
+    await refreshAfterRefundAction(root, state);
   } catch (error) {
     state.error = error.message;
     render(root, state);
+  }
+}
+
+async function refreshAfterRefundAction(root, state) {
+  if (state.selectedInvoice) {
+    await loadInvoice(root, state, state.selectedInvoice.id, false);
+  } else {
+    await refreshRefunds(root, state);
   }
 }
 
