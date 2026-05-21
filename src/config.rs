@@ -222,12 +222,6 @@ impl Config {
                         store.id
                     );
                 }
-                if !matches!(sweep.backend, LightningBackend::Phoenixd) {
-                    bail!(
-                        "store {} lightning_sweep currently supports phoenixd only",
-                        store.id
-                    );
-                }
                 if let Some(lightning) = &store.lightning
                     && lightning.api_password_env.as_deref() == Some(&sweep.full_api_password_env)
                 {
@@ -578,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_barkd_lightning_sweep_backend() {
+    fn validates_barkd_lightning_sweep_backend() {
         let config: Config = toml::from_str(
             r#"
             [database]
@@ -597,12 +591,12 @@ mod tests {
             [stores.lightning_sweep]
             backend = "barkd"
             url = "http://127.0.0.1:3000"
-            full_api_password_env = "BARKD_AUTH_TOKEN"
+            full_api_password_env = "BARKD_SWEEP_AUTH_TOKEN"
             destination_descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
             "#,
         )
         .unwrap();
 
-        assert!(config.validate().is_err());
+        config.validate().unwrap();
     }
 }

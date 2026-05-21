@@ -49,7 +49,7 @@ pub async fn sweep_to_address(
 ) -> anyhow::Result<Option<SweepResult>> {
     match config.backend {
         LightningBackend::Phoenixd => sweep_phoenixd_to_address(config, address).await,
-        LightningBackend::Barkd => anyhow::bail!("barkd lightning sweep is not supported"),
+        LightningBackend::Barkd => sweep_barkd_to_address(config, address).await,
     }
 }
 
@@ -293,6 +293,71 @@ async fn sweep_phoenixd_to_address(
     }))
 }
 
+async fn sweep_barkd_to_address(
+    config: &LightningSweepConfig,
+    address: String,
+) -> anyhow::Result<Option<SweepResult>> {
+    let token = std::env::var(&config.full_api_password_env)
+        .with_context(|| format!("missing env var {}", config.full_api_password_env))?;
+    let client = reqwest::Client::new();
+    let balance = get_barkd_balance(config, &client, &token).await?;
+    let decision = sweep_decision(
+        balance.spendable_sats,
+        config.min_balance_sats,
+        config.target_balance_sats,
+    );
+    let Some(amount_sats) = decision.amount_sats else {
+        return Ok(None);
+    };
+
+    let response: BarkdSendOnchainResponse = client
+        .post(format!(
+            "{}/api/v1/wallet/send-onchain",
+            config.url.trim_end_matches('/')
+        ))
+        .bearer_auth(token)
+        .json(&BarkdSendOnchainRequest {
+            destination: address.clone(),
+            amount_sat: amount_sats,
+        })
+        .send()
+        .await
+        .context("barkd send-onchain request failed")?
+        .error_for_status()
+        .context("barkd send-onchain returned an error")?
+        .json()
+        .await
+        .context("failed to decode barkd send-onchain response")?;
+
+    Ok(Some(SweepResult {
+        balance_sats: balance.spendable_sats,
+        amount_sats,
+        address,
+        tx_id: Some(response.offboard_txid),
+    }))
+}
+
+async fn get_barkd_balance(
+    config: &LightningSweepConfig,
+    client: &reqwest::Client,
+    token: &str,
+) -> anyhow::Result<BarkdBalanceResponse> {
+    client
+        .get(format!(
+            "{}/api/v1/wallet/balance",
+            config.url.trim_end_matches('/')
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .context("barkd balance request failed")?
+        .error_for_status()
+        .context("barkd balance returned an error")?
+        .json()
+        .await
+        .context("failed to decode barkd balance response")
+}
+
 async fn get_phoenixd_balance(
     config: &LightningSweepConfig,
     client: &reqwest::Client,
@@ -367,6 +432,23 @@ struct BarkdReceiveResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct BarkdBalanceResponse {
+    #[serde(rename = "spendable_sat")]
+    spendable_sats: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct BarkdSendOnchainRequest {
+    destination: String,
+    amount_sat: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct BarkdSendOnchainResponse {
+    offboard_txid: String,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PhoenixdIncomingPaymentResponse {
     is_paid: bool,
@@ -393,11 +475,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        BarkdReceiveResponse, PhoenixdBalanceResponse, create_invoice, next_status, observe,
-        sweep_decision,
+        BarkdBalanceResponse, BarkdReceiveResponse, PhoenixdBalanceResponse, create_invoice,
+        next_status, observe, sweep_decision, sweep_to_address,
     };
     use crate::{
-        config::{LightningBackend, LightningConfig},
+        config::{LightningBackend, LightningConfig, LightningSweepConfig},
         invoice::{Invoice, InvoiceStatus},
     };
 
@@ -462,6 +544,22 @@ mod tests {
         assert!(receive.preimage_revealed_at.is_some());
     }
 
+    #[test]
+    fn decodes_barkd_balance_response() {
+        let balance: BarkdBalanceResponse = serde_json::from_str(
+            r#"{
+                "spendable_sat": 150000,
+                "pending_lightning_send_sat": 0,
+                "claimable_lightning_receive_sat": 0,
+                "pending_in_round_sat": 0,
+                "pending_board_sat": 0,
+                "pending_exit_sat": null
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(balance.spendable_sats, 150_000);
+    }
+
     #[tokio::test]
     async fn barkd_create_invoice_uses_json_api_and_bearer_auth() {
         let server = test_barkd_server().await;
@@ -523,6 +621,37 @@ mod tests {
         assert_eq!(status, InvoiceStatus::Settled);
     }
 
+    #[tokio::test]
+    async fn barkd_sweep_sends_excess_spendable_balance() {
+        let server = test_barkd_server().await;
+        let env = format!("QPAYD_TEST_BARKD_TOKEN_{}", Uuid::new_v4().simple());
+        unsafe {
+            std::env::set_var(&env, "test-token");
+        }
+        let result = sweep_to_address(
+            &LightningSweepConfig {
+                backend: LightningBackend::Barkd,
+                url: server,
+                full_api_password_env: env,
+                destination_descriptor: None,
+                destination_descriptor_env: None,
+                min_balance_sats: 100_000,
+                target_balance_sats: 25_000,
+                interval_seconds: 3600,
+                feerate_sat_byte: None,
+            },
+            "bc1qexample".to_string(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result.balance_sats, 150_000);
+        assert_eq!(result.amount_sats, 125_000);
+        assert_eq!(result.address, "bc1qexample");
+        assert_eq!(result.tx_id.as_deref(), Some("barkd-offboard-txid"));
+    }
+
     async fn test_barkd_server() -> String {
         use axum::{
             Json, Router,
@@ -568,12 +697,48 @@ mod tests {
             })))
         }
 
+        async fn balance(headers: HeaderMap) -> Result<Json<serde_json::Value>, StatusCode> {
+            assert_eq!(
+                headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer test-token")
+            );
+            Ok(Json(serde_json::json!({
+                "spendable_sat": 150000,
+                "pending_lightning_send_sat": 0,
+                "claimable_lightning_receive_sat": 0,
+                "pending_in_round_sat": 0,
+                "pending_board_sat": 0,
+                "pending_exit_sat": null
+            })))
+        }
+
+        async fn send_onchain(
+            headers: HeaderMap,
+            Json(body): Json<serde_json::Value>,
+        ) -> Result<Json<serde_json::Value>, StatusCode> {
+            assert_eq!(
+                headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer test-token")
+            );
+            assert_eq!(body["destination"], "bc1qexample");
+            assert_eq!(body["amount_sat"], 125_000);
+            Ok(Json(serde_json::json!({
+                "offboard_txid": "barkd-offboard-txid"
+            })))
+        }
+
         let app = Router::new()
             .route("/api/v1/lightning/receives/invoice", post(create_invoice))
             .route(
                 "/api/v1/lightning/receives/{identifier}",
                 get(receive_status),
-            );
+            )
+            .route("/api/v1/wallet/balance", get(balance))
+            .route("/api/v1/wallet/send-onchain", post(send_onchain));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
