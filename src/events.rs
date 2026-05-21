@@ -46,6 +46,14 @@ pub fn refund_approved_event(refund: &Refund, created_at: DateTime<Utc>) -> Even
     refund_event(refund, "refund.approved", created_at)
 }
 
+pub fn refund_processing_event(refund: &Refund, created_at: DateTime<Utc>) -> EventEnvelope {
+    refund_event(refund, "refund.processing", created_at)
+}
+
+pub fn refund_retry_event(refund: &Refund, created_at: DateTime<Utc>) -> EventEnvelope {
+    refund_event(refund, "refund.retry", created_at)
+}
+
 pub fn refund_finalized_event(refund: &Refund, created_at: DateTime<Utc>) -> EventEnvelope {
     refund_event(refund, "refund.finalized", created_at)
 }

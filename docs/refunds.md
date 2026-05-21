@@ -99,6 +99,28 @@ curl -sS https://pay.example.com/v1/stores/main/refunds/$REFUND_ID \
 Confirm the response shows `"approval_status":"approved"`, then finalize or run
 the refund executor and confirm the refund reaches `"status":"succeeded"`.
 
+Run refund execution once:
+
+```sh
+qpayd --config qpayd.toml refunds-once
+```
+
+Then query the refund and confirm it is `"status":"processing"`,
+`"status":"succeeded"`, or `"status":"failed"`. A successful payout should
+include a `tx_id` for Bitcoin refunds or `payment_proof` for Lightning refunds.
+A refund left in `"status":"processing"` has started payout execution and should
+be inspected before retrying manually.
+
+Run refund execution continuously:
+
+```sh
+qpayd --config qpayd.toml refunds
+```
+
+For an end-to-end check, create a small invoice, pay it, create a tiny refund,
+run the executor, then query the refund and confirm it is `"status":"succeeded"`
+or `"status":"failed"` with the expected payout fields.
+
 ## Refund Execution Config
 
 qpayd has per-store payout config for refund execution. Lightning payouts share

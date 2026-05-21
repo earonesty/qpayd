@@ -114,6 +114,7 @@ impl TryFrom<&str> for RefundApprovalStatus {
 #[serde(rename_all = "snake_case")]
 pub enum RefundStatus {
     Pending,
+    Processing,
     Succeeded,
     Canceled,
     Failed,
@@ -123,6 +124,7 @@ impl RefundStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::Processing => "processing",
             Self::Succeeded => "succeeded",
             Self::Canceled => "canceled",
             Self::Failed => "failed",
@@ -136,6 +138,7 @@ impl TryFrom<&str> for RefundStatus {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "pending" => Ok(Self::Pending),
+            "processing" => Ok(Self::Processing),
             "succeeded" => Ok(Self::Succeeded),
             "canceled" => Ok(Self::Canceled),
             "failed" => Ok(Self::Failed),

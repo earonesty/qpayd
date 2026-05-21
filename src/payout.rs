@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use anyhow::{Context, bail};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
