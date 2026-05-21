@@ -1,4 +1,6 @@
 fly/
 /target
+node_modules/
+/public
 *.db
 *.sqlite
