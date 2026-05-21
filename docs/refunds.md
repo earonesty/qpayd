@@ -96,10 +96,11 @@ payout_token_env = "QPAYD_MAIN_PAYOUT_TOKEN"
 admin_token_can_payout = true
 ```
 
-Verify the setting with one small refund request: call the refund mutation with
-the admin token and confirm it is allowed when `admin_token_can_payout = true`.
-Set it back to `false`, reload qpayd, repeat the same request, and confirm qpayd
-returns `401`.
+Verify the setting with one small refund request against
+`POST /v1/stores/main/invoices/$INVOICE_ID/refunds`: use the admin token and
+confirm qpayd returns `2xx` when `admin_token_can_payout = true`. Set it back to
+`false`, reload qpayd, repeat the same request, and confirm qpayd returns
+`401 Unauthorized`.
 
 Approve a refund that crosses `manual_approval_threshold_sats`:
 
