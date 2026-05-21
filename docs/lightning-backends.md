@@ -46,12 +46,13 @@ Run the sweep service separately when you want a stronger security split:
 qpayd --config qpayd.toml sweep
 ```
 
-Hot-wallet refund execution uses its own config block and full wallet
-credential. Keep that credential with the wallet host when splitting public
+Hot-wallet refund execution uses per-store config blocks and full wallet
+credentials. Keep those credentials with the wallet host when splitting public
 receive from wallet operations:
 
 ```toml
-[stores.hot_wallet]
+[[stores.hot_wallets]]
+id = "lightning-refunds"
 enabled = true
 refund_execution_enabled = false
 backend = "barkd"
