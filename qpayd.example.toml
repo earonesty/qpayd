@@ -65,3 +65,32 @@ interval_seconds = 3600
 # min_balance_sats = 100000
 # target_balance_sats = 25000
 # interval_seconds = 3600
+
+# Optional per-store hot-wallet service configs. These are validated but refund
+# execution is not active until qpayd implements the executor loop.
+#
+# [[stores.hot_wallets]]
+# id = "lightning-refunds"
+# enabled = true
+# refund_execution_enabled = false
+# backend = "barkd"
+# url = "http://127.0.0.1:3000"
+# full_api_password_env = "BARKD_FULL_AUTH_TOKEN"
+# max_refund_sats = 100000
+# daily_refund_limit_sats = 500000
+# manual_approval_threshold_sats = 250000
+# refund_poll_seconds = 30
+# allowed_refund_destination_types = ["lightning_invoice", "lnurl"]
+#
+# [[stores.hot_wallets]]
+# id = "bitcoin-refunds"
+# enabled = true
+# refund_execution_enabled = false
+# backend = "bitcoind"
+# url = "http://127.0.0.1:8332"
+# full_api_password_env = "BITCOIND_REFUND_PASSWORD"
+# max_refund_sats = 100000
+# daily_refund_limit_sats = 500000
+# manual_approval_threshold_sats = 250000
+# refund_poll_seconds = 30
+# allowed_refund_destination_types = ["bitcoin_address", "bitcoin_uri"]

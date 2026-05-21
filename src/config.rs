@@ -5,6 +5,8 @@ use reqwest::Url;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
+use crate::invoice::RefundDestinationType;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -69,6 +71,8 @@ pub struct StoreConfig {
     pub lightning: Option<LightningConfig>,
     pub lightning_sweep: Option<LightningSweepConfig>,
     #[serde(default)]
+    pub hot_wallets: Vec<HotWalletConfig>,
+    #[serde(default)]
     pub payment_links: Vec<PaymentLinkConfig>,
 }
 
@@ -117,10 +121,37 @@ pub struct LightningSweepConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct HotWalletConfig {
+    pub id: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub refund_execution_enabled: bool,
+    pub backend: HotWalletBackend,
+    pub url: String,
+    pub full_api_password_env: String,
+    #[serde(default = "default_hot_wallet_refund_poll_seconds")]
+    pub refund_poll_seconds: u64,
+    pub max_refund_sats: u64,
+    pub daily_refund_limit_sats: u64,
+    pub manual_approval_threshold_sats: Option<u64>,
+    #[serde(default)]
+    pub allowed_refund_destination_types: Vec<RefundDestinationType>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LightningBackend {
     Phoenixd,
     Barkd,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HotWalletBackend {
+    Phoenixd,
+    Barkd,
+    Bitcoind,
 }
 
 impl LightningBackend {
@@ -128,6 +159,32 @@ impl LightningBackend {
         match self {
             Self::Phoenixd => "phoenixd",
             Self::Barkd => "barkd",
+        }
+    }
+}
+
+impl HotWalletBackend {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Phoenixd => "phoenixd",
+            Self::Barkd => "barkd",
+            Self::Bitcoind => "bitcoind",
+        }
+    }
+
+    pub fn supports_refund_destination_type(
+        &self,
+        destination_type: RefundDestinationType,
+    ) -> bool {
+        match self {
+            Self::Phoenixd | Self::Barkd => matches!(
+                destination_type,
+                RefundDestinationType::LightningInvoice | RefundDestinationType::Lnurl
+            ),
+            Self::Bitcoind => matches!(
+                destination_type,
+                RefundDestinationType::BitcoinAddress | RefundDestinationType::BitcoinUri
+            ),
         }
     }
 }
@@ -295,6 +352,50 @@ impl Config {
                         )
                     })?;
             }
+            let mut hot_wallet_ids = HashSet::new();
+            for hot_wallet in &store.hot_wallets {
+                if hot_wallet.id.trim().is_empty() {
+                    bail!("store {} hot_wallet id cannot be empty", store.id);
+                }
+                if !hot_wallet_ids.insert(hot_wallet.id.as_str()) {
+                    bail!(
+                        "store {} has duplicate hot_wallet id {}",
+                        store.id,
+                        hot_wallet.id
+                    );
+                }
+                if !hot_wallet.enabled {
+                    continue;
+                }
+                if hot_wallet.url.trim().is_empty() {
+                    bail!(
+                        "store {} hot_wallet {} {} url cannot be empty",
+                        store.id,
+                        hot_wallet.id,
+                        hot_wallet.backend.as_str()
+                    );
+                }
+                if hot_wallet.full_api_password_env.trim().is_empty() {
+                    bail!(
+                        "store {} hot_wallet {} full_api_password_env cannot be empty",
+                        store.id,
+                        hot_wallet.id
+                    );
+                }
+                if let Some(lightning) = &store.lightning
+                    && lightning.api_password_env.as_deref()
+                        == Some(&hot_wallet.full_api_password_env)
+                {
+                    bail!(
+                        "store {} hot_wallet {} full_api_password_env must be separate from lightning api_password_env",
+                        store.id,
+                        hot_wallet.id
+                    );
+                }
+                if hot_wallet.refund_execution_enabled {
+                    validate_hot_wallet_refunds(&store.id, hot_wallet)?;
+                }
+            }
         }
 
         Ok(())
@@ -417,6 +518,65 @@ fn default_sweep_interval_seconds() -> u64 {
     3600
 }
 
+fn default_hot_wallet_refund_poll_seconds() -> u64 {
+    30
+}
+
+fn validate_hot_wallet_refunds(store_id: &str, hot_wallet: &HotWalletConfig) -> anyhow::Result<()> {
+    if hot_wallet.max_refund_sats == 0 {
+        bail!(
+            "store {store_id} hot_wallet {} max_refund_sats must be greater than zero",
+            hot_wallet.id
+        );
+    }
+    if hot_wallet.daily_refund_limit_sats == 0 {
+        bail!(
+            "store {store_id} hot_wallet {} daily_refund_limit_sats must be greater than zero",
+            hot_wallet.id
+        );
+    }
+    if hot_wallet.daily_refund_limit_sats < hot_wallet.max_refund_sats {
+        bail!(
+            "store {store_id} hot_wallet {} daily_refund_limit_sats must be at least max_refund_sats",
+            hot_wallet.id
+        );
+    }
+    if let Some(threshold) = hot_wallet.manual_approval_threshold_sats
+        && threshold == 0
+    {
+        bail!(
+            "store {store_id} hot_wallet {} manual_approval_threshold_sats must be greater than zero",
+            hot_wallet.id
+        );
+    }
+    if hot_wallet.refund_poll_seconds == 0 {
+        bail!(
+            "store {store_id} hot_wallet {} refund_poll_seconds must be greater than zero",
+            hot_wallet.id
+        );
+    }
+    if hot_wallet.allowed_refund_destination_types.is_empty() {
+        bail!(
+            "store {store_id} hot_wallet {} allowed_refund_destination_types cannot be empty",
+            hot_wallet.id
+        );
+    }
+    for destination_type in &hot_wallet.allowed_refund_destination_types {
+        if !hot_wallet
+            .backend
+            .supports_refund_destination_type(*destination_type)
+        {
+            bail!(
+                "store {store_id} hot_wallet {} backend {} cannot execute {} refunds",
+                hot_wallet.id,
+                hot_wallet.backend.as_str(),
+                destination_type.as_str()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn validate_public_allowed_origins(scope: &str, origins: &[String]) -> anyhow::Result<()> {
     for origin in origins {
         let trimmed = origin.trim();
@@ -499,7 +659,8 @@ fn validate_script_integrity(integrity: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, HotWalletBackend, HotWalletConfig, validate_hot_wallet_refunds};
+    use crate::invoice::RefundDestinationType;
 
     #[test]
     fn validates_public_payment_links() {
@@ -736,5 +897,332 @@ mod tests {
         .unwrap();
 
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn validates_hot_wallet_refund_config() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.lightning]
+            backend = "barkd"
+            url = "http://127.0.0.1:3000"
+            api_password_env = "BARKD_AUTH_TOKEN"
+
+            [[stores.hot_wallets]]
+            id = "lightning-refunds"
+            enabled = true
+            refund_execution_enabled = true
+            backend = "barkd"
+            url = "http://127.0.0.1:3000"
+            full_api_password_env = "BARKD_FULL_AUTH_TOKEN"
+            max_refund_sats = 100000
+            daily_refund_limit_sats = 500000
+            manual_approval_threshold_sats = 250000
+            allowed_refund_destination_types = ["lightning_invoice", "lnurl"]
+            "#,
+        )
+        .unwrap();
+
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn validates_multiple_hot_wallet_refund_backends_per_store() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.lightning]
+            backend = "barkd"
+            url = "http://127.0.0.1:3000"
+            api_password_env = "BARKD_AUTH_TOKEN"
+
+            [[stores.hot_wallets]]
+            id = "lightning-refunds"
+            enabled = true
+            refund_execution_enabled = true
+            backend = "barkd"
+            url = "http://127.0.0.1:3000"
+            full_api_password_env = "BARKD_FULL_AUTH_TOKEN"
+            max_refund_sats = 100000
+            daily_refund_limit_sats = 500000
+            allowed_refund_destination_types = ["lightning_invoice", "lnurl"]
+
+            [[stores.hot_wallets]]
+            id = "bitcoin-refunds"
+            enabled = true
+            refund_execution_enabled = true
+            backend = "bitcoind"
+            url = "http://127.0.0.1:8332"
+            full_api_password_env = "BITCOIND_REFUND_PASSWORD"
+            max_refund_sats = 100000
+            daily_refund_limit_sats = 500000
+            allowed_refund_destination_types = ["bitcoin_address", "bitcoin_uri"]
+            "#,
+        )
+        .unwrap();
+
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_hot_wallet_refund_limits_below_single_refund() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.lightning]
+            backend = "barkd"
+            url = "http://127.0.0.1:3000"
+            api_password_env = "BARKD_AUTH_TOKEN"
+
+            [[stores.hot_wallets]]
+            id = "lightning-refunds"
+            enabled = true
+            refund_execution_enabled = true
+            backend = "barkd"
+            url = "http://127.0.0.1:3000"
+            full_api_password_env = "BARKD_FULL_AUTH_TOKEN"
+            max_refund_sats = 100000
+            daily_refund_limit_sats = 50000
+            allowed_refund_destination_types = ["lightning_invoice"]
+            "#,
+        )
+        .unwrap();
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("daily_refund_limit_sats"));
+    }
+
+    #[test]
+    fn rejects_zero_hot_wallet_max_refund_sats() {
+        let mut hot_wallet = valid_hot_wallet_refund_config();
+        hot_wallet.max_refund_sats = 0;
+
+        let error = validate_hot_wallet_refunds("main", &hot_wallet)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("max_refund_sats"));
+    }
+
+    #[test]
+    fn rejects_zero_hot_wallet_daily_refund_limit_sats() {
+        let mut hot_wallet = valid_hot_wallet_refund_config();
+        hot_wallet.daily_refund_limit_sats = 0;
+
+        let error = validate_hot_wallet_refunds("main", &hot_wallet)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("daily_refund_limit_sats"));
+    }
+
+    #[test]
+    fn rejects_zero_hot_wallet_manual_approval_threshold_sats() {
+        let mut hot_wallet = valid_hot_wallet_refund_config();
+        hot_wallet.manual_approval_threshold_sats = Some(0);
+
+        let error = validate_hot_wallet_refunds("main", &hot_wallet)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("manual_approval_threshold_sats"));
+    }
+
+    #[test]
+    fn rejects_zero_hot_wallet_refund_poll_seconds() {
+        let mut hot_wallet = valid_hot_wallet_refund_config();
+        hot_wallet.refund_poll_seconds = 0;
+
+        let error = validate_hot_wallet_refunds("main", &hot_wallet)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("refund_poll_seconds"));
+    }
+
+    #[test]
+    fn rejects_empty_hot_wallet_allowed_refund_destination_types() {
+        let mut hot_wallet = valid_hot_wallet_refund_config();
+        hot_wallet.allowed_refund_destination_types.clear();
+
+        let error = validate_hot_wallet_refunds("main", &hot_wallet)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("allowed_refund_destination_types"));
+    }
+
+    #[test]
+    fn rejects_shared_lightning_invoice_and_hot_wallet_secret_env() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.lightning]
+            backend = "barkd"
+            url = "http://127.0.0.1:3000"
+            api_password_env = "BARKD_AUTH_TOKEN"
+
+            [[stores.hot_wallets]]
+            id = "lightning-refunds"
+            enabled = true
+            refund_execution_enabled = true
+            backend = "barkd"
+            url = "http://127.0.0.1:3000"
+            full_api_password_env = "BARKD_AUTH_TOKEN"
+            max_refund_sats = 100000
+            daily_refund_limit_sats = 500000
+            allowed_refund_destination_types = ["lightning_invoice"]
+            "#,
+        )
+        .unwrap();
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("full_api_password_env must be separate"));
+    }
+
+    #[test]
+    fn rejects_duplicate_hot_wallet_ids_per_store() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.lightning]
+            backend = "barkd"
+            url = "http://127.0.0.1:3000"
+            api_password_env = "BARKD_AUTH_TOKEN"
+
+            [[stores.hot_wallets]]
+            id = "refunds"
+            enabled = true
+            refund_execution_enabled = false
+            backend = "barkd"
+            url = "http://127.0.0.1:3000"
+            full_api_password_env = "BARKD_FULL_AUTH_TOKEN"
+            max_refund_sats = 100000
+            daily_refund_limit_sats = 500000
+            allowed_refund_destination_types = ["lightning_invoice"]
+
+            [[stores.hot_wallets]]
+            id = "refunds"
+            enabled = true
+            refund_execution_enabled = false
+            backend = "bitcoind"
+            url = "http://127.0.0.1:8332"
+            full_api_password_env = "BITCOIND_REFUND_PASSWORD"
+            max_refund_sats = 100000
+            daily_refund_limit_sats = 500000
+            allowed_refund_destination_types = ["bitcoin_address"]
+            "#,
+        )
+        .unwrap();
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("duplicate hot_wallet id"));
+    }
+
+    #[test]
+    fn rejects_disabled_duplicate_hot_wallet_ids_per_store() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.lightning]
+            backend = "barkd"
+            url = "http://127.0.0.1:3000"
+            api_password_env = "BARKD_AUTH_TOKEN"
+
+            [[stores.hot_wallets]]
+            id = "refunds"
+            enabled = false
+            refund_execution_enabled = false
+            backend = "barkd"
+            url = "http://127.0.0.1:3000"
+            full_api_password_env = "BARKD_FULL_AUTH_TOKEN"
+            max_refund_sats = 100000
+            daily_refund_limit_sats = 500000
+            allowed_refund_destination_types = ["lightning_invoice"]
+
+            [[stores.hot_wallets]]
+            id = "refunds"
+            enabled = false
+            refund_execution_enabled = false
+            backend = "bitcoind"
+            url = "http://127.0.0.1:8332"
+            full_api_password_env = "BITCOIND_REFUND_PASSWORD"
+            max_refund_sats = 100000
+            daily_refund_limit_sats = 500000
+            allowed_refund_destination_types = ["bitcoin_address"]
+            "#,
+        )
+        .unwrap();
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("duplicate hot_wallet id"));
+    }
+
+    #[test]
+    fn rejects_hot_wallet_destination_types_not_supported_by_backend() {
+        let mut hot_wallet = valid_hot_wallet_refund_config();
+        hot_wallet.backend = HotWalletBackend::Bitcoind;
+
+        let error = validate_hot_wallet_refunds("main", &hot_wallet)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot execute lightning_invoice refunds"));
+    }
+
+    fn valid_hot_wallet_refund_config() -> HotWalletConfig {
+        HotWalletConfig {
+            id: "lightning-refunds".to_string(),
+            enabled: true,
+            refund_execution_enabled: true,
+            backend: HotWalletBackend::Barkd,
+            url: "http://127.0.0.1:3000".to_string(),
+            full_api_password_env: "BARKD_FULL_AUTH_TOKEN".to_string(),
+            refund_poll_seconds: 30,
+            max_refund_sats: 100_000,
+            daily_refund_limit_sats: 500_000,
+            manual_approval_threshold_sats: Some(250_000),
+            allowed_refund_destination_types: vec![
+                RefundDestinationType::LightningInvoice,
+                RefundDestinationType::Lnurl,
+            ],
+        }
     }
 }
