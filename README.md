@@ -144,6 +144,10 @@ export BARKD_SWEEP_AUTH_TOKEN="$BARKD_AUTH_TOKEN"
 generate one receive address per invoice and watch those addresses for payment.
 It does not let `qpayd` spend coins.
 
+Address derivation state is stored in the configured database, per store. Back
+up the qpayd database with the same care as other payment records so a restore
+continues from the next unused address index.
+
 Use a normal singlesig Bitcoin wallet for the first store. Export the account
 extended public key from the wallet, then wrap it as a descriptor.
 

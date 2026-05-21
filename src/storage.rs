@@ -1492,6 +1492,12 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn address_indexes_are_persisted_per_store() {
+        let store = test_store().await;
+        address_indexes_are_persisted_per_store_for(store.as_ref()).await;
+    }
+
+    #[tokio::test]
     async fn sqlite_migrate_records_initial_schema_once() {
         let path = std::env::temp_dir().join(format!("qpayd-migration-test-{}.db", Uuid::new_v4()));
         let store = SqliteStore::connect(&format!("sqlite://{}", path.display()))
@@ -1550,6 +1556,9 @@ mod tests {
 
         clean_pg_store(&store).await;
         updates_payment_amounts_without_status_event_for(&store).await;
+
+        clean_pg_store(&store).await;
+        address_indexes_are_persisted_per_store_for(&store).await;
     }
 
     async fn insert_invoice_persists_event_and_webhook_delivery_for(store: &dyn Store) {
@@ -1742,6 +1751,14 @@ mod tests {
         let events = store.events(&invoice.store_id, 10).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "invoice.created");
+    }
+
+    async fn address_indexes_are_persisted_per_store_for(store: &dyn Store) {
+        assert_eq!(store.reserve_address_index("main").await.unwrap(), 0);
+        assert_eq!(store.reserve_address_index("main").await.unwrap(), 1);
+        assert_eq!(store.reserve_address_index("secondary").await.unwrap(), 0);
+        assert_eq!(store.reserve_address_index("main").await.unwrap(), 2);
+        assert_eq!(store.reserve_address_index("secondary").await.unwrap(), 1);
     }
 
     async fn test_store() -> Box<dyn Store> {
