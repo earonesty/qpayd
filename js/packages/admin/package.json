@@ -1,0 +1,21 @@
+{
+  "name": "@qpayd/admin",
+  "version": "0.4.0",
+  "description": "Browser admin panel for qpayd merchant operations.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "examples"
+  ],
+  "scripts": {
+    "check": "node --check src/index.js",
+    "test": "node --test"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT"
+}

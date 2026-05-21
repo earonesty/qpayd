@@ -1,14 +1,17 @@
-# @qpayd/js
+# qpayd browser packages
 
-Browser helpers for qpayd payment flows.
+qpayd publishes separate browser packages for customer checkout and merchant
+admin workflows.
 
-The package does not need a build step. Import the ESM module and open a modal
-from a configured public payment link:
+## @qpayd/checkout
+
+Browser helpers for qpayd payment flows. The package does not need a build step.
+Import the ESM module and open a modal from a configured public payment link:
 
 ```html
 <button id="pay">Pay with Bitcoin</button>
 <script type="module">
-  import { openPaymentLink } from "./js/src/index.js";
+  import { openPaymentLink } from "@qpayd/checkout";
 
   document.querySelector("#pay").addEventListener("click", () => {
     openPaymentLink({
@@ -31,3 +34,35 @@ Backends can also create invoices with the qpayd admin API and pass the invoice
 JSON into `openInvoiceModal({ client, invoice })`.
 
 The modal is customer UX only. Fulfill orders from qpayd signed webhooks.
+
+## @qpayd/admin
+
+The admin panel is a browser-only UI that talks directly to the qpayd admin API.
+Configure the qpayd base URL and store id when mounting it; the login form asks
+for the store API token.
+
+```html
+<main id="qpayd-admin"></main>
+<script type="module">
+  import { mountQPaydAdmin } from "@qpayd/admin";
+
+  mountQPaydAdmin("#qpayd-admin", {
+    baseUrl: "https://pay.example.com",
+    storeId: "main"
+  });
+</script>
+```
+
+Set `admin_allowed_origins` for the store in qpayd config when hosting the
+admin panel on a different browser origin than the API:
+
+```toml
+[[stores]]
+id = "main"
+admin_allowed_origins = ["https://admin.example.com"]
+```
+
+The panel lists invoices, opens invoice details, creates invoice-scoped refund
+records, scans QR codes for refund destinations, cancels pending refunds, and
+finalizes refunds after an operator sends funds from the wallet or Lightning
+node that controls them.

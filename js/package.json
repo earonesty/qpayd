@@ -1,16 +1,12 @@
 {
-  "name": "@qpayd/js",
-  "version": "0.3.0",
-  "description": "Browser client and modal checkout UI for qpayd.",
+  "private": true,
   "type": "module",
-  "exports": {
-    ".": "./src/index.js"
-  },
-  "files": [
-    "src"
+  "workspaces": [
+    "packages/*"
   ],
   "scripts": {
-    "test": "node --test"
-  },
-  "license": "MIT"
+    "check": "npm --workspaces run check",
+    "pack:dry-run": "npm --workspaces pack --dry-run",
+    "test": "npm --workspaces test --if-present"
+  }
 }

@@ -102,6 +102,11 @@ pub trait Store: Send + Sync {
     ) -> anyhow::Result<()>;
     async fn refund(&self, store_id: &str, id: Uuid) -> anyhow::Result<Option<Refund>>;
     async fn refunds(&self, store_id: &str, limit: u32) -> anyhow::Result<Vec<Refund>>;
+    async fn refunds_for_invoice(
+        &self,
+        store_id: &str,
+        invoice_id: Uuid,
+    ) -> anyhow::Result<Vec<Refund>>;
     async fn update_refund_status(
         &self,
         refund: &Refund,
@@ -690,6 +695,27 @@ impl Store for SqliteStore {
         )
         .bind(store_id)
         .bind(i64::from(limit.clamp(1, 200)))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(refund_from_row).collect()
+    }
+
+    async fn refunds_for_invoice(
+        &self,
+        store_id: &str,
+        invoice_id: Uuid,
+    ) -> anyhow::Result<Vec<Refund>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, store_id, invoice_id, status, amount_sats, destination,
+                   reason, tx_id, metadata, created_at, updated_at, finalized_at
+            FROM refunds
+            WHERE store_id = ? AND invoice_id = ?
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(store_id)
+        .bind(invoice_id.to_string())
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(refund_from_row).collect()
@@ -1311,6 +1337,27 @@ impl Store for PostgresStore {
         )
         .bind(store_id)
         .bind(i64::from(limit.clamp(1, 200)))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(refund_from_pg_row).collect()
+    }
+
+    async fn refunds_for_invoice(
+        &self,
+        store_id: &str,
+        invoice_id: Uuid,
+    ) -> anyhow::Result<Vec<Refund>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, store_id, invoice_id, status, amount_sats, destination,
+                   reason, tx_id, metadata, created_at, updated_at, finalized_at
+            FROM qpayd_refunds
+            WHERE store_id = $1 AND invoice_id = $2
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(store_id)
+        .bind(invoice_id.to_string())
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(refund_from_pg_row).collect()
@@ -2482,6 +2529,12 @@ mod tests {
         assert_eq!(found.status, RefundStatus::Succeeded);
         assert_eq!(found.tx_id.as_deref(), Some("tx123"));
         assert_eq!(store.refunds(&refund.store_id, 10).await.unwrap().len(), 1);
+        let invoice_refunds = store
+            .refunds_for_invoice(&refund.store_id, invoice.id)
+            .await
+            .unwrap();
+        assert_eq!(invoice_refunds.len(), 1);
+        assert_eq!(invoice_refunds[0].id, refund.id);
 
         let sweep = LightningSweepRecord {
             id: Uuid::new_v4(),

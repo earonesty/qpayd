@@ -1,0 +1,21 @@
+{
+  "name": "@qpayd/checkout",
+  "version": "0.4.0",
+  "description": "Browser checkout modal and public invoice helpers for qpayd.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "examples"
+  ],
+  "scripts": {
+    "check": "node --check src/index.js",
+    "test": "node --test"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>qpayd admin</title>
+  </head>
+  <body>
+    <main id="qpayd-admin"></main>
+    <script type="module">
+      import { mountQPaydAdmin } from "../src/index.js";
+
+      mountQPaydAdmin("#qpayd-admin", {
+        baseUrl: "https://pay.example.com",
+        storeId: "main"
+      });
+    </script>
+  </body>
+</html>
