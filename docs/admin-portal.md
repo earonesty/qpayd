@@ -6,11 +6,22 @@ order: 50
 
 # Admin portal
 
-The admin portal is release-pinned because Bitcoin operators care about exact
-bytes and checksums. Use the generated release docs for copy-paste config:
+qpayd can serve a minimal `/admin` page for store operators. The daemon does
+not bundle the admin UI. Instead, `/admin` loads the `@qpayd/admin` browser
+package from a configured URL and asks the browser to verify the downloaded
+bytes with Subresource Integrity.
 
-- [Latest admin-portal.html](https://github.com/earonesty/qpayd/releases/latest/download/admin-portal.html)
-- [Latest admin-portal.md](https://github.com/earonesty/qpayd/releases/latest/download/admin-portal.md)
+The config below is filled from the latest qpayd release metadata when this page
+loads. Avoid `@latest` in production config because it can change without a
+qpayd config change.
+
+```toml
+[server.admin]
+enabled = true
+store_id = "main"
+asset_source = "__QPAYD_ADMIN_ASSET_SOURCE__"
+asset_integrity = "__QPAYD_ADMIN_ASSET_INTEGRITY__"
+```
 
 `@qpayd/admin` is a browser-only UI that talks directly to the qpayd admin API.
 Configure the qpayd base URL when mounting it. Add `storeId` to pin the panel to
@@ -45,16 +56,7 @@ If `payout_token_env` is configured, payout and refund actions use that token.
 Set `admin_token_can_payout = true` on a store when one admin token should also
 be able to run payout actions.
 
-qpayd can serve a minimal `/admin` bootstrap page that loads a pinned admin
-asset. The daemon does not bundle the admin UI. Use the generated release doc
-above for the exact `asset_source` and `asset_integrity` values.
-
-```toml
-[server.admin]
-enabled = true
-asset_source = "https://cdn.jsdelivr.net/npm/@qpayd/admin@VERSION/src/index.js"
-asset_integrity = "sha384-..."
-```
+Remote admin assets require `asset_integrity` and must use `https`.
 
 Set `store_id = "main"` to pin the hosted `/admin` page to one store. If
 `store_id` is omitted, the page does not publish store ids in the HTML. After
@@ -72,5 +74,3 @@ the returned scopes. With `store_id = "main"`, the page should only accept
 tokens for that store. With `store_id` omitted, a token that reaches more than
 one store should show a store selector. Repeat with a token that should not have
 access and confirm qpayd rejects it.
-
-Remote admin assets require `asset_integrity` and must use `https`.

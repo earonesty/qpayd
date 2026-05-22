@@ -3,7 +3,7 @@
   "type": "module",
   "scripts": {
     "build": "node build-docs.mjs",
-    "render-admin-portal": "node render-admin-portal-doc.mjs"
+    "render-admin-metadata": "node render-admin-metadata.mjs"
   },
   "dependencies": {
     "gray-matter": "^4.0.3",

@@ -70,6 +70,7 @@ function renderPage(page, allPages, css) {
 
   const previous = allPages[allPages.indexOf(page) - 1];
   const next = allPages[allPages.indexOf(page) + 1];
+  const pageScript = page.slug === "admin-portal" ? adminPortalScript() : "";
 
   return `<!doctype html>
 <html lang="en">
@@ -99,8 +100,49 @@ function renderPage(page, allPages, css) {
       </nav>
     </article>
   </main>
+  ${pageScript}
 </body>
 </html>`;
+}
+
+function adminPortalScript() {
+  return `<script>
+(() => {
+  const sourceToken = "__QPAYD_ADMIN_ASSET_SOURCE__";
+  const integrityToken = "__QPAYD_ADMIN_ASSET_INTEGRITY__";
+  const blocks = Array.from(document.querySelectorAll(".docs-article pre code"))
+    .filter((block) => block.textContent.includes(sourceToken) || block.textContent.includes(integrityToken));
+
+  if (blocks.length === 0) return;
+
+  const status = document.createElement("p");
+  status.className = "docs-release-status";
+  status.textContent = "Loading latest release checksum...";
+  blocks[0].closest("pre").before(status);
+
+  fetch("./admin-portal.latest.json", { cache: "no-store" })
+    .then((response) => {
+      if (!response.ok) throw new Error("metadata request failed");
+      return response.json();
+    })
+    .then((metadata) => {
+      if (!metadata.asset_source || !metadata.asset_integrity || !metadata.qpayd_version) {
+        throw new Error("metadata is incomplete");
+      }
+
+      for (const block of blocks) {
+        block.textContent = block.textContent
+          .replaceAll(sourceToken, metadata.asset_source)
+          .replaceAll(integrityToken, metadata.asset_integrity);
+      }
+
+      status.textContent = \`Showing admin asset values for qpayd \${metadata.qpayd_version}.\`;
+    })
+    .catch(() => {
+      status.textContent = "Latest release checksum metadata is unavailable. Check the release artifact admin-portal.json.";
+    });
+})();
+</script>`;
 }
 
 async function siteCss() {
@@ -203,6 +245,12 @@ async function siteCss() {
       display: block;
       padding: 18px;
       font: 13px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .docs-release-status {
+      margin: 16px 0 10px;
+      color: var(--muted) !important;
+      font-size: 14px;
     }
 
     .anchor {

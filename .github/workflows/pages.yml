@@ -32,6 +32,22 @@ jobs:
           cp site/index.html public/
           cp -R js public/js
           SITE_OUT_DIR="$PWD/public" npm --prefix site run build
+          metadata_url="$(
+            (curl -fsSL https://api.github.com/repos/earonesty/qpayd/releases/latest || true) \
+              | node -e 'let input = ""; process.stdin.on("data", (chunk) => input += chunk); process.stdin.on("end", () => { try { const release = JSON.parse(input || "{}"); const asset = (release.assets || []).find((item) => item.name === "admin-portal.json"); if (asset) console.log(asset.browser_download_url); } catch {} });'
+          )"
+          if [ -n "${metadata_url}" ] && curl -fsSL "${metadata_url}" -o public/docs/admin-portal.latest.json && [ -s public/docs/admin-portal.latest.json ]; then
+            echo "Using admin metadata from latest release asset."
+          else
+            admin_version="$(node -p "require('./js/packages/admin/package.json').version")"
+            admin_asset_source="https://cdn.jsdelivr.net/npm/@qpayd/admin@${admin_version}/src/index.js"
+            OUT_DIR="$PWD/public/docs" \
+              QPAYD_VERSION="v${admin_version}" \
+              ADMIN_ASSET_SOURCE="${admin_asset_source}" \
+              ADMIN_ASSET_INTEGRITY_SOURCE="$PWD/js/packages/admin/src/index.js" \
+              npm --prefix site run render-admin-metadata
+            mv public/docs/admin-portal.json public/docs/admin-portal.latest.json
+          fi
       - uses: actions/upload-pages-artifact@v3
         with:
           path: public

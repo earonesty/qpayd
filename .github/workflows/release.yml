@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
   github-release:
@@ -28,12 +30,13 @@ jobs:
     env:
       PG_URL: postgres://postgres:postgres@localhost:5432/qpayd_test
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - run: cargo fmt -- --check
       - run: cargo test
@@ -54,7 +57,7 @@ jobs:
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
           (cd dist && sha256sum "${package}.tar.gz" > SHA256SUMS)
 
-      - name: Render admin portal docs
+      - name: Render admin portal metadata
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
@@ -65,7 +68,9 @@ jobs:
             QPAYD_VERSION="${tag}" \
             ADMIN_ASSET_SOURCE="${admin_asset_source}" \
             ADMIN_ASSET_INTEGRITY_SOURCE="$PWD/js/packages/admin/src/index.js" \
-            npm --prefix site run render-admin-portal
+            npm --prefix site run render-admin-metadata
+          mkdir -p public/docs
+          cp dist/admin-portal.json public/docs/admin-portal.latest.json
 
       - name: Create GitHub release
         env:
@@ -77,7 +82,11 @@ jobs:
             --verify-tag \
             --title "qpayd ${tag}" \
             --generate-notes \
-            dist/admin-portal.md \
-            dist/admin-portal.html \
+            dist/admin-portal.json \
             dist/*.tar.gz \
             dist/SHA256SUMS
+
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: public
+      - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
