@@ -60,6 +60,29 @@ so the exported xpub maps directly to invoice receive addresses.
 3. Copy the wallet descriptor, or copy the account xpub and script type.
 4. Use the descriptor directly if it ends with `/0/*`.
 
+## Electrum
+
+Use a standard wallet.
+
+1. Open the wallet.
+2. Open the wallet information (computer) or wallet details (Android).
+3. Copy the Master Public Key.
+4. Use `wpkh(YOUR_XPUB/0/*)` for a native SegWit account.
+
+Do not use a 2FA or multisig wallet for the first setup. Use a standard wallet
+so the exported xpub maps directly to invoice receive addresses.
+
+## BlueWallet
+
+1. Select the wallet.
+2. Press/click (...) for settings.
+3. Press Export/Backup if it is a watch-only wallet OR if seeded, select Show Wallet XPUB under Options.
+4. Copy the account's xpub or zpub.
+5. Use `wpkh(YOUR_XPUB/0/*)` for a native SegWit account.
+
+Do not use a Multisig Valunt for the first setup. Use the default Bitcoin wallet
+so the exported xpub maps directly to invoice receive addresses.
+
 ## Test the link
 
 Before taking real payments, create a small invoice and pay it from another
