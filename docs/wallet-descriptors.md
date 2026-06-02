@@ -80,7 +80,7 @@ so the exported xpub maps directly to invoice receive addresses.
 4. Copy the account's xpub or zpub.
 5. Use `wpkh(YOUR_XPUB/0/*)` for a native SegWit account.
 
-Do not use a Multisig Valunt for the first setup. Use the default Bitcoin wallet
+Do not use a Multisig Vault for the first setup. Use the default Bitcoin wallet
 so the exported xpub maps directly to invoice receive addresses.
 
 ## Test the link
