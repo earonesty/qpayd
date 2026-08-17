@@ -3091,6 +3091,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{PostgresStore, SqliteStore, Store};
+    use crate::config::Config;
     use crate::{
         events::{invoice_created_event, invoice_status_event},
         invoice::{
@@ -3142,9 +3143,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn address_indexes_are_persisted_per_store() {
+    async fn address_indexes_are_isolated_by_default_store_id() {
         let store = test_store().await;
         address_indexes_are_persisted_per_store_for(store.as_ref()).await;
+    }
+
+    #[tokio::test]
+    async fn address_indexes_are_shared_for_resolved_namespace() {
+        let store = test_store().await;
+        address_indexes_are_shared_for_resolved_namespace_for(store.as_ref()).await;
     }
 
     #[tokio::test]
@@ -3262,6 +3269,9 @@ mod tests {
 
         clean_pg_store(&store).await;
         address_indexes_are_persisted_per_store_for(&store).await;
+
+        clean_pg_store(&store).await;
+        address_indexes_are_shared_for_resolved_namespace_for(&store).await;
 
         clean_pg_store(&store).await;
         refund_and_sweep_records_round_trip_for(&store).await;
@@ -3518,6 +3528,78 @@ mod tests {
         assert_eq!(store.reserve_address_index("secondary").await.unwrap(), 0);
         assert_eq!(store.reserve_address_index("main").await.unwrap(), 2);
         assert_eq!(store.reserve_address_index("secondary").await.unwrap(), 1);
+    }
+
+    fn namespaces_for_test() -> (String, String) {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "q32"
+            name = "Q32"
+            api_token_env = "QPAYD_Q32_API_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            address_index_namespace = "q32"
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+
+            [[stores]]
+            id = "markbegone"
+            name = "MarkBeGone"
+            api_token_env = "QPAYD_MARKBEGONE_API_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            address_index_namespace = "q32"
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+            "#,
+        )
+        .unwrap();
+
+        let q32 = config
+            .store("q32")
+            .unwrap()
+            .onchain
+            .as_ref()
+            .unwrap()
+            .address_index_namespace("q32")
+            .to_string();
+        let markbegone = config
+            .store("markbegone")
+            .unwrap()
+            .onchain
+            .as_ref()
+            .unwrap()
+            .address_index_namespace("markbegone")
+            .to_string();
+        (q32, markbegone)
+    }
+
+    async fn address_indexes_are_shared_for_resolved_namespace_for(store: &dyn Store) {
+        let (q32_namespace, markbegone_namespace) = namespaces_for_test();
+        assert_eq!(q32_namespace, "q32");
+        assert_eq!(markbegone_namespace, "q32");
+
+        assert_eq!(
+            store.reserve_address_index(&q32_namespace).await.unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .reserve_address_index(&markbegone_namespace)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store.reserve_address_index(&q32_namespace).await.unwrap(),
+            2
+        );
     }
 
     async fn refund_and_sweep_records_round_trip_for(store: &dyn Store) {

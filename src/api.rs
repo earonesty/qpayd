@@ -449,7 +449,8 @@ async fn build_invoice(
     let btc_amount_sats = sats_for(input.amount, rate.value)?;
     let (onchain_address, onchain_address_index, onchain_script_pubkey) = match &store_cfg.onchain {
         Some(onchain) => {
-            let index = state.store.reserve_address_index(&input.store_id).await?;
+            let namespace = onchain.address_index_namespace(&input.store_id);
+            let index = state.store.reserve_address_index(namespace).await?;
             let descriptor = onchain
                 .descriptor()?
                 .parse::<Descriptor<DescriptorPublicKey>>()

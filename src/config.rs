@@ -108,6 +108,7 @@ pub struct OnchainConfig {
     pub network: String,
     pub descriptor: Option<String>,
     pub descriptor_env: Option<String>,
+    pub address_index_namespace: Option<String>,
     #[serde(default)]
     pub electrum_servers: Vec<String>,
 }
@@ -344,6 +345,14 @@ impl Config {
                 if onchain.electrum_servers.is_empty() {
                     bail!("store {} on-chain config needs electrum_servers", store.id);
                 }
+                if let Some(namespace) = &onchain.address_index_namespace
+                    && (namespace.trim().is_empty() || namespace.trim() != namespace)
+                {
+                    bail!(
+                        "store {} onchain.address_index_namespace cannot be empty or contain surrounding whitespace",
+                        store.id
+                    );
+                }
                 onchain
                     .descriptor()?
                     .parse::<miniscript::Descriptor<miniscript::DescriptorPublicKey>>()
@@ -558,6 +567,10 @@ fn token_from_env(env: &str) -> anyhow::Result<String> {
 }
 
 impl OnchainConfig {
+    pub fn address_index_namespace<'a>(&'a self, store_id: &'a str) -> &'a str {
+        self.address_index_namespace.as_deref().unwrap_or(store_id)
+    }
+
     pub fn descriptor(&self) -> anyhow::Result<String> {
         match (&self.descriptor, &self.descriptor_env) {
             (Some(_), Some(_)) => bail!("use descriptor or descriptor_env, not both"),
@@ -821,6 +834,85 @@ mod tests {
             .unwrap();
         assert_eq!(link.currency, "USD");
         assert_eq!(link.metadata["kind"], "donation");
+    }
+
+    #[test]
+    fn reads_optional_onchain_address_index_namespace() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            address_index_namespace = "q32"
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config
+                .store("main")
+                .unwrap()
+                .onchain
+                .as_ref()
+                .unwrap()
+                .address_index_namespace
+                .as_deref(),
+            Some("q32")
+        );
+        assert_eq!(
+            config
+                .store("main")
+                .unwrap()
+                .onchain
+                .as_ref()
+                .unwrap()
+                .address_index_namespace("main"),
+            "q32"
+        );
+        assert_eq!(
+            config
+                .store("main")
+                .unwrap()
+                .onchain
+                .as_ref()
+                .unwrap()
+                .address_index_namespace("secondary"),
+            "q32"
+        );
+    }
+
+    #[test]
+    fn rejects_blank_onchain_address_index_namespace() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "main"
+            name = "Main Store"
+            api_token_env = "QPAYD_MAIN_API_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            address_index_namespace = " "
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+            "#,
+        )
+        .unwrap();
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("onchain.address_index_namespace"));
     }
 
     #[test]
