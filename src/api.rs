@@ -449,7 +449,14 @@ async fn build_invoice(
     let btc_amount_sats = sats_for(input.amount, rate.value)?;
     let (onchain_address, onchain_address_index, onchain_script_pubkey) = match &store_cfg.onchain {
         Some(onchain) => {
-            let index = state.store.reserve_address_index(&input.store_id).await?;
+            let address_index_namespace = onchain
+                .address_index_namespace
+                .as_deref()
+                .unwrap_or(&input.store_id);
+            let index = state
+                .store
+                .reserve_address_index(address_index_namespace)
+                .await?;
             let descriptor = onchain
                 .descriptor()?
                 .parse::<Descriptor<DescriptorPublicKey>>()
@@ -1972,7 +1979,9 @@ mod tests {
 
     use super::{AppState, refund_destination_type, router, sats_for};
     use crate::{
-        config::{BitcoinPayoutBackend, BitcoinPayoutConfig, Config, RefundExecutionConfig},
+        config::{
+            BitcoinPayoutBackend, BitcoinPayoutConfig, Config, RefundExecutionConfig, StoreConfig,
+        },
         events,
         invoice::{PaymentAmounts, RefundDestinationType, RefundStatus},
         pricing::{Rate, RateSource},
@@ -2072,6 +2081,79 @@ mod tests {
             second["onchain_address_index"],
             first["onchain_address_index"]
         );
+    }
+
+    #[tokio::test]
+    async fn create_invoice_shared_onchain_address_index_namespace_advances_sequentially() {
+        // SAFETY: this test uses a single fixed value and does not depend on
+        // concurrent mutation of the same environment variable.
+        unsafe {
+            std::env::set_var("QPAYD_TEST_API_TOKEN", "test-token");
+        }
+
+        let app = test_app_with_config(two_store_config(Some("shared-wallet"))).await;
+
+        let primary = create_invoice_for_store(&app, "primary").await;
+        let secondary = create_invoice_for_store(&app, "secondary").await;
+
+        assert_eq!(primary["onchain_address_index"], 0);
+        assert_eq!(secondary["onchain_address_index"], 1);
+    }
+
+    #[tokio::test]
+    async fn create_invoice_without_onchain_namespace_uses_store_isolated_counters() {
+        // SAFETY: this test uses a single fixed value and does not depend on
+        // concurrent mutation of the same environment variable.
+        unsafe {
+            std::env::set_var("QPAYD_TEST_API_TOKEN", "test-token");
+        }
+
+        let app = test_app_with_config(two_store_config(None)).await;
+
+        let primary = create_invoice_for_store(&app, "primary").await;
+        let secondary = create_invoice_for_store(&app, "secondary").await;
+
+        assert_eq!(primary["onchain_address_index"], 0);
+        assert_eq!(secondary["onchain_address_index"], 0);
+    }
+
+    async fn create_invoice_for_store(app: &axum::Router, store_id: &str) -> serde_json::Value {
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/v1/stores/{store_id}/invoices"))
+            .header(header::AUTHORIZATION, "Bearer test-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"amount":"10.00","currency":"USD"}"#))
+            .unwrap();
+
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
+    }
+
+    fn two_store_config(address_index_namespace: Option<&str>) -> Config {
+        let mut config = test_config();
+
+        config.stores[0].id = "primary".to_string();
+        config.stores[0].name = "Primary Store".to_string();
+        config.stores[0].api_token_env = Some("QPAYD_TEST_API_TOKEN".to_string());
+        set_onchain_namespace(&mut config.stores[0], address_index_namespace);
+
+        let mut secondary = config.stores[0].clone();
+        secondary.id = "secondary".to_string();
+        secondary.name = "Secondary Store".to_string();
+        secondary.api_token_env = Some("QPAYD_TEST_API_TOKEN".to_string());
+        set_onchain_namespace(&mut secondary, address_index_namespace);
+        config.stores.push(secondary);
+
+        config.validate().unwrap();
+        config
+    }
+
+    fn set_onchain_namespace(store: &mut StoreConfig, namespace: Option<&str>) {
+        if let Some(onchain) = store.onchain.as_mut() {
+            onchain.address_index_namespace = namespace.map(|value| value.to_string());
+        }
     }
 
     #[tokio::test]

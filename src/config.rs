@@ -110,6 +110,7 @@ pub struct OnchainConfig {
     pub descriptor_env: Option<String>,
     #[serde(default)]
     pub electrum_servers: Vec<String>,
+    pub address_index_namespace: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -343,6 +344,14 @@ impl Config {
                 onchain.network.parse::<bitcoin::Network>()?;
                 if onchain.electrum_servers.is_empty() {
                     bail!("store {} on-chain config needs electrum_servers", store.id);
+                }
+                if let Some(namespace) = &onchain.address_index_namespace
+                    && (namespace.trim().is_empty() || namespace.trim() != namespace)
+                {
+                    bail!(
+                        "store {} onchain address_index_namespace must be non-empty and cannot have surrounding whitespace",
+                        store.id
+                    );
                 }
                 onchain
                     .descriptor()?
@@ -821,6 +830,83 @@ mod tests {
             .unwrap();
         assert_eq!(link.currency, "USD");
         assert_eq!(link.metadata["kind"], "donation");
+    }
+
+    #[test]
+    fn validates_non_empty_onchain_address_index_namespace() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "primary"
+            name = "Primary Store"
+            api_token_env = "QPAYD_PRIMARY_API_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            address_index_namespace = "shared-wallet"
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+            "#,
+        )
+        .unwrap();
+
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_empty_onchain_address_index_namespace() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "primary"
+            name = "Primary Store"
+            api_token_env = "QPAYD_PRIMARY_API_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            address_index_namespace = ""
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+            "#,
+        )
+        .unwrap();
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("address_index_namespace must be non-empty")
+                || error.contains("onchain address_index_namespace")
+        );
+    }
+
+    #[test]
+    fn rejects_whitespace_surrounded_onchain_address_index_namespace() {
+        let config: Config = toml::from_str(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[stores]]
+            id = "primary"
+            name = "Primary Store"
+            api_token_env = "QPAYD_PRIMARY_API_TOKEN"
+
+            [stores.onchain]
+            network = "bitcoin"
+            descriptor = "wpkh([3842548f/84'/0'/0']xpub6BemYiVNp19a1XmM4Q7cRpWqWzSvEYHbHBWbGTtDtFeZ4896wYfHzXnuRmgBSK8fEsqGiHa25de7hsoh3cRK3EonL8vd9kWUE7oVGLTshha/0/*)#flualjt8"
+            address_index_namespace = " shared-wallet "
+            electrum_servers = ["ssl://electrum.blockstream.info:50002"]
+            "#,
+        )
+        .unwrap();
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("cannot have surrounding whitespace"));
     }
 
     #[test]
